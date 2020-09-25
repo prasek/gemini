@@ -2,6 +2,7 @@ import os
 from gemini import Geminipy
 from tabulate import tabulate
 from decimal import Decimal
+import yaml
 
 fee_pct =           0.0010
 taker_fee_delta =   0.0025
@@ -23,13 +24,9 @@ def init():
     print("-----------------------")
     site = input("Which Exchange? [live | sandbox] ")
 
-    api_key = input("api_key: ")
-    if not live and api_key == '':
-        api_key = ""
 
+    api_key = input("api_key: ")
     secret_key = input("secret_key: ")
-    if not live and secret_key == '':
-        secret_key = ""
 
     os.system('clear')
 
@@ -45,6 +42,13 @@ def init():
         print("****      GEMINI       ****")
         print("****      SANDBOX      ****")
         print("***************************")
+        with open(r'test.yaml') as file:
+            creds = yaml.load(file, Loader=yaml.FullLoader)
+
+            if not live and api_key == '':
+                api_key = creds["api_key"]
+            if not live and secret_key == '':
+                secret_key = creds["secret_key"]
 
     print()
     print("help or ? for commands")
