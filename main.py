@@ -3,7 +3,8 @@ from gemini import Geminipy
 from tabulate import tabulate
 from decimal import Decimal
 
-fee_pct = 0.001
+fee_pct =           0.0010
+taker_fee_delta =   0.0025
 usd_fmt = "${:,.2f}" 
 nbr_fmt = "{:,.2f}" 
 btc_fmt = "{:.8f}"
@@ -11,18 +12,16 @@ btc_fmt = "{:.8f}"
 def init():
     os.system('clear')
 
-    print("/t************************************************")
-    print("/t***** Gemini Trading App ***********************")
-    print("/t************************************************")
-
     api_key = ''
     secret_key = ''
 
     live = False
-    site = input("live|sandbox: ")
-    if site == "live":
-        live = True
-        print("WARNING: using LIVE site")
+
+    print()
+    print("-----------------------")
+    print("GEMINI API LOGIN")
+    print("-----------------------")
+    site = input("Which Exchange? [live | sandbox] ")
 
     api_key = input("api_key: ")
     if not live and api_key == '':
@@ -31,6 +30,24 @@ def init():
     secret_key = input("secret_key: ")
     if not live and secret_key == '':
         secret_key = ""
+
+    os.system('clear')
+
+    if site == "live":
+        live = True
+        print()
+        print("***************************")
+        print("****      GEMINI       ****")
+        print("****   LIVE EXCHANGE   ****")
+        print("***************************")
+    else:
+        print("***************************")
+        print("****      GEMINI       ****")
+        print("****      SANDBOX      ****")
+        print("***************************")
+
+    print()
+    print("help or ? for commands")
 
     return Geminipy(api_key=api_key, secret_key=secret_key, live=live)
     
@@ -52,7 +69,9 @@ def print_orders(orders):
     print(tabulate(l, headers=headers, floatfmt=".8g"))
 
 def print_tick(tick):
-    headers = ["last", "bid", "ask", "spread"]
+    print()
+    print("QUOTE")
+    headers = ["bid", "ask", "spread", "last"]
     print_list([tick], headers)
 
 def print_list(items, headers):
@@ -88,7 +107,8 @@ def get_price_quantity(side, quantity_unit):
 
 
 def execute_order(side, price, quantity, subtotal, fee, total):
-    print("getting tick ...")
+    print()
+    print("QUOTE")
     tick = con.pubticker(symbol="btcusd").json()
     ask = float(tick["ask"])
     bid = float(tick["bid"])
@@ -137,24 +157,61 @@ def execute_order(side, price, quantity, subtotal, fee, total):
         return False
 
     res = con.new_order(amount=amount_btc, price=price, side=side, options=["maker-or-cancel"])
+    order = res.json()
 
     if res.status_code != 200:
         print()
         print("Error status: {0}".format(res.status_code))
         print(res.json())
         print("Error status: {0}".format(res.status_code))
-    else:
-        print()
-        print("OK!")
-        print_orders([res.json()])
+        return False
 
+    elif order["is_cancelled"]:
+        print()
+        print("AUTO CANCELLED - MAKER FEE NOT AVAILABLE!")
+        print()
+
+        extra_fee = subtotal * taker_fee_delta
+
+        ok = input("Resubmit order with additional TAKER fee of {0}?? (yes/no) ".format(usd_fmt.format(extra_fee)))
+        if ok != "yes" and ok != "y":
+            print("skipping order")
+            return False
+
+        res = con.new_order(amount=amount_btc, price=price, side=side)
+        order = res.json()
+
+        if res.status_code != 200:
+            print()
+            print("Error status: {0}".format(res.status_code))
+            print(res.json())
+            print("Error status: {0}".format(res.status_code))
+            return False
+
+    print()
+    print("OK!")
+    print_orders([res.json()])
+
+def print_help():
+        cmds = [
+                ["buy", "buy in USD quantity (including fee)"],
+                ["buy btc", "buy in BTC quantity"],
+                ["sell", "buy in USD quantity (including fee)"],
+                ["sell btc", "sell in BTC quantity"],
+                ["list", "list open orders"],
+                ["tick", "price quote"],
+                ["cancel", "cancel order id"],
+                ["cancel all", "cancel all open orders"],
+                ["exit", "exit the console app"],
+                ]
+        print(tabulate(cmds, headers=["command", "info"]))
 
 con = init()
 cmd = ''
-while cmd != 'quit' and cmd != 'q':
+while True:
 
     print()
-    cmd = input("[buy|sell|tick|list|quit]> ")
+    cmd = input("$ > ")
 
     if cmd == 'buy':
         side = 'buy'
@@ -254,7 +311,13 @@ while cmd != 'quit' and cmd != 'q':
         print("all orders cancelled")
 
     elif cmd == 'tick':
-        tick = con.pubticker(symbol="btcusd").json()
+        res = con.pubticker(symbol="btcusd")
+        if res.status_code != 200:
+            print("ERROR STATUS: {0}".format(res.status_code))
+            print(res.json())
+            continue
+
+        tick = res.json()
         tick["spread"] = float(tick["ask"]) - float(tick["bid"])
         print_tick(tick)
 
@@ -262,13 +325,18 @@ while cmd != 'quit' and cmd != 'q':
         res = con.active_orders()
         if res.status_code != 200:
             print("ERROR STATUS: {0}".format(res.status_code))
+            print(res.json())
             continue
 
         print_orders(res.json())
 
-    elif cmd == 'quit' or cmd == 'q':
-        print("exiting")
+    elif cmd == 'quit' or cmd == 'q' or cmd == 'exit':
+        print("Have a good one!")
+        break
+
+    elif cmd == 'help' or cmd == '?':
+        print_help()
 
     else:
-        print("unknown commmand")
+        print_help()
 
