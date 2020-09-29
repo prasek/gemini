@@ -206,6 +206,7 @@ def print_help():
                 ["tick", "price quote"],
                 ["cancel", "cancel order id"],
                 ["cancel all", "cancel all open orders"],
+                ["bal", "balances and available amounts"],
                 ["exit", "exit the console app"],
                 ]
         print(tabulate(cmds, headers=["command", "info"]))
@@ -333,6 +334,14 @@ while True:
             continue
 
         print_orders(res.json())
+
+    elif cmd == 'bal':
+        res = con.balances()
+        if res.status_code != 200:
+            print("ERROR STATUS: {0}".format(res.status_code))
+            print(res.json())
+            continue
+        print_list(res.json(), ["type", "currency", "amount", "available"])
 
     elif cmd == 'quit' or cmd == 'q' or cmd == 'exit':
         print("Have a good one!")
