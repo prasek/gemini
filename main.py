@@ -3,100 +3,294 @@ from gemini import Geminipy
 from tabulate import tabulate
 from decimal import Decimal
 import yaml
+import getpass
+import locale
+from datetime import datetime
 
-fee_pct =           0.0010
-taker_fee_delta =   0.0025
-usd_fmt = "${:,.2f}" 
-nbr_fmt = "{:,.2f}" 
-btc_fmt = "{:.8f}"
+api_maker_fee =    0.0010
+taker_fee_delta =  0.0025
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
-def init():
-    os.system('clear')
+def show_help():
+        cmds = [
+                ["bal", "balances and available amounts - [alt: balances]"],
+                ["stat", "avg. cost basis, gain/loss, performance"],
+                ["list", "list open orders - [alt: orders, active]"],
+                ["tick", "price quote - [alt: quote]"],
+                ["buy", "buy in USD quantity (including fee)"],
+                ["buy btc", "buy in BTC quantity"],
+                ["sell", "buy in USD quantity (including fee)"],
+                ["sell btc", "sell in BTC quantity"],
+                ["cancel", "cancel order id"],
+                ["cancel all", "cancel all open orders"],
+                ["past", "list past trades - [alt: history]"],
+                ["fees", "show fees"],
+                ["exit", "exit the console app"],
+                ]
+        print(tabulate(cmds, headers=["command", "info"]))
 
-    api_key = ''
-    secret_key = ''
+def show_balances(con):
+    bid, ask, spread, last = get_quote(con)
+    if bid < 0:
+        print("Error: bid unavailable")
+        return
 
-    live = False
-
-    print()
-    print("-----------------------")
-    print("GEMINI API LOGIN")
-    print("-----------------------")
-    site = input("Which Exchange? [live | sandbox] ")
-
-
-    api_key = input("api_key: ")
-    secret_key = input("secret_key: ")
-
-    os.system('clear')
-
-    if site == "live":
-        live = True
-        print()
-        print("***************************")
-        print("****      GEMINI       ****")
-        print("****   LIVE EXCHANGE   ****")
-        print("***************************")
+    res = con.balances()
+    if res.status_code != 200:
+        print("ERROR STATUS: {0}".format(res.status_code))
+        print(res.json())
     else:
-        print("***************************")
-        print("****      GEMINI       ****")
-        print("****      SANDBOX      ****")
-        print("***************************")
-        with open(r'test.yaml') as file:
-            creds = yaml.load(file, Loader=yaml.FullLoader)
+        headers = ["currency", "amount", "available"]
+        balances = res.json()
 
-            if not live and api_key == '':
-                api_key = creds["api_key"]
-            if not live and secret_key == '':
-                secret_key = creds["secret_key"]
+        account_value = 0.0
+        available_to_trade_usd = 0.0
+        available_to_trade_btc = 0.0
+        l = []
+        for b in balances:
+            currency = b["currency"]
+            amount = float(b["amount"])
+            available = float(b["available"])
+            if currency == "USD":
+                account_value += amount
+                available_to_trade_usd = available
+            elif currency == "BTC":
+                account_value += amount * last
+                available_to_trade_btc = available
+            else:
+                continue
 
-    print()
-    print("help or ? for commands")
+            item = []
+            for h in headers:
+                item.append(b[h])
+            l.append(item)
 
-    return Geminipy(api_key=api_key, secret_key=secret_key, live=live)
-    
+        #print()
+        #print("BALANCES")
+        #print_sep()
+        #print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
+        #print_sep()
+
+        headers = ["Notational Account Value", "Available to Trade (USD)", "Available to Trade (BTC)"]
+        data = [[
+                fmt_usd(account_value),
+                fmt_usd(available_to_trade_usd),
+                fmt_btc(available_to_trade_btc),
+                ]]
+
+        print()
+        print("BALANCES")
+        print_sep()
+        print(tabulate(data, headers=headers, floatfmt=".8g", stralign="right"))
+        print_sep()
+
+def show_orders(con):
+    res = con.active_orders()
+    if res.status_code != 200:
+        print("ERROR STATUS: {0}".format(res.status_code))
+        print(res.json())
+    else:
+        orders = res.json()
+        print_orders(orders)
+
 def print_orders(orders):
-    headers = ["symbol", "side", "type", "price", "original_amount", "symbol", "total", "executed_amount", "remaining_amount", "order_id"]
-    l = []
-    for o in orders: 
-        price = float(o["price"])
-        quantity = float(o["original_amount"])
-        total = price * quantity
-        o["total"] = "{0} USD".format(usd_fmt.format(total))
-        item = []
-        for h in headers:
-            item.append(o[h])
-        l.append(item)
+        headers = ["side", "total", "type", "price", "original_amount", "symbol", "executed_amount", "avg_execution_price", "remaining_amount", "order_id"]
+        l = []
+        for o in orders:
+            price = float(o["price"])
+            quantity = float(o["original_amount"])
+            total = price * quantity
+            o["total"] = fmt_usd(total)
+            o["price"] = fmt_usd(price)
+            o["avg_execution_price"] = fmt_usd(float(o["avg_execution_price"]))
+            item = []
+            for h in headers:
+                item.append(o[h])
+            l.append(item)
 
-    #print(l)
-    #print()
-    print(tabulate(l, headers=headers, floatfmt=".8g"))
+        print()
+        print("OPEN ORDERS")
+        print_sep()
+        print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
+        print_sep()
 
-def print_tick(tick):
+def show_history(con, history=True, stats=True):
+    symbol = "btcusd"
+    res = con.past_trades(symbol=symbol, limit_trades=1000)
+    if res.status_code != 200:
+        print("ERROR STATUS: {0}".format(res.status_code))
+        print(res.json())
+    else:
+        orders = res.json()
+        headers = ["date", "type", "total", "price", "amount", "symbol", "fee_amount", "order_id"]
+        l = []
+        buy_total = 0.0
+        buy_quantity = 0.0
+
+        for o in orders:
+            price = float(o["price"])
+            quantity = float(o["amount"])
+            fees = float(o["fee_amount"])
+            total = price * quantity + fees
+            dt = datetime.fromtimestamp(o["timestamp"])
+            o["date"] = dt.strftime("%m/%d/%Y")
+            o["total"] = fmt_usd(total)
+            o["fee_amount"] = fmt_usd(fees)
+            o["price"] = fmt_usd(price)
+            o["symbol"] = symbol
+            item = []
+            for h in headers:
+                item.append(o[h])
+            l.append(item)
+
+            if o["type"] == "Buy":
+                buy_total += total
+                buy_quantity += quantity
+
+        if history:
+            print()
+            print("HISTORY")
+            print_sep()
+            print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
+            print_sep()
+
+        if stats:
+            avg_cost_basis = buy_total/buy_quantity
+            bid, ask, spread, last = get_quote(con)
+            perf = ((last / avg_cost_basis) - 1) * 100
+            curr_value = buy_quantity * last
+            gain = curr_value - buy_total
+
+            headers = ["gain/loss", "gain/loss %", "avg cost basis/btc", "last price", "cost basis", "current value"]
+            stats = [[
+                    fmt_usd(gain),
+                    fmt_pct(perf),
+                    fmt_usd(avg_cost_basis),
+                    fmt_usd(last),
+                    fmt_usd(buy_total),
+                    fmt_usd(curr_value),
+                    ]]
+
+            print()
+            print("TRADE STATS")
+            print_sep()
+            print(tabulate(stats, headers=headers, stralign="right"))
+            print_sep()
+
+def get_quote(con):
+    res = con.pubticker(symbol="btcusd")
+    if res.status_code != 200:
+        print("ERROR STATUS: {0}".format(res.status_code))
+        print(res.json())
+        return -1, -1, -1, -1
+
+    tick = res.json()
+    ask = float(tick["ask"])
+    bid = float(tick["bid"])
+    last = float(tick["last"])
+    spread = ask - bid
+
+    return bid, ask, spread, last
+
+def show_quote(con):
+    bid, ask, spread, last = get_quote(con)
+    if bid < 0:
+        return
+
     print()
     print("QUOTE")
-    headers = ["bid", "ask", "spread", "last"]
-    print_list([tick], headers)
+    print_sep()
+    print("{0} ASK".format(fmt_nbr(ask)))
+    print("Spread of {0}, LAST: {1}".format(fmt_nbr(spread), format(fmt_nbr(last))))
+    print("{0} BID".format(fmt_nbr(bid)))
+    print_sep()
 
-def print_list(items, headers):
-    l = []
-    for o in items: 
-        item = []
-        for h in headers:
-            item.append(o[h])
-        l.append(item)
+    return bid, ask, spread, last
 
-    #print(l)
-    #print()
-    print(tabulate(l, headers=headers, floatfmt=".8g"))
-    #print(tabulate(l, headers=headers))
 
-def is_float(s):
-    try :
-        float(s)
-        return True
-    except :
-        return False
+def buy(con):
+    side = 'buy'
+    quantity_unit = "USD"
+
+    price, amount_usd = get_price_quantity(side, quantity_unit)
+    if price is None or amount_usd is None:
+        return
+
+    subtotal = float(amount_usd) / (1 + api_maker_fee)
+    fee = subtotal * api_maker_fee
+    total = subtotal + fee
+
+    amount_btc = fmt_btc(subtotal / float(price))
+
+    execute_order(con,
+            side,
+            price=price,
+            quantity=amount_btc,
+            subtotal=subtotal,
+            fee=fee,
+            total=total)
+
+def buy_btc(con):
+    side = 'buy'
+    quantity_unit = "BTC"
+
+    price, amount_btc = get_price_quantity(side, quantity_unit)
+    if price is None or amount_btc is None:
+        return
+
+    subtotal = float(amount_btc) * float(price)
+    fee = subtotal * api_maker_fee
+    total = subtotal + fee
+
+    execute_order(con,
+            side,
+            price=price,
+            quantity=amount_btc,
+            subtotal=subtotal,
+            fee=fee,
+            total=total)
+
+def sell(con):
+    side = 'sell'
+    quantity_unit = "USD"
+
+    price, amount_usd = get_price_quantity(side, quantity_unit)
+    if price is None or amount_usd is None:
+        return
+
+    subtotal = float(amount_usd) / (1 - api_maker_fee)
+    fee = subtotal * api_maker_fee
+    total = subtotal - fee
+
+    amount_btc = fmt_btc((float(subtotal) / float(price)))
+
+    execute_order(con,
+            side,
+            price=price,
+            quantity=amount_btc,
+            subtotal=subtotal,
+            fee=fee,
+            total=total)
+
+def sell_btc(con):
+    side = 'sell'
+    quantity_unit = "BTC"
+
+    price, amount_btc = get_price_quantity(side, quantity_unit)
+    if price is None or amount_btc is None:
+        return
+
+    subtotal = float(amount_btc) * float(price)
+    fee = subtotal * api_maker_fee
+    total = subtotal - fee
+
+    execute_order(con,
+            side,
+            price=price,
+            quantity=amount_btc,
+            subtotal=subtotal,
+            fee=fee,
+            total=total)
 
 def get_price_quantity(side, quantity_unit):
         print(side.upper())
@@ -109,58 +303,45 @@ def get_price_quantity(side, quantity_unit):
 
         return price, quantity
 
+def execute_order(con, side, price, quantity, subtotal, fee, total):
 
-def execute_order(side, price, quantity, subtotal, fee, total):
-    print()
-    print("QUOTE")
-    tick = con.pubticker(symbol="btcusd").json()
-    ask = float(tick["ask"])
-    bid = float(tick["bid"])
-    last = float(tick["last"])
-    prc = float(price)
-    spread = ask - bid
-    print("--------------------")
-    print("{0} ASK".format(nbr_fmt.format(ask)))
-    print("Spread of {0}, LAST: {1}".format(nbr_fmt.format(spread), format(nbr_fmt.format(last))))
-    print("{0} BID".format(nbr_fmt.format(bid)))
-    print("--------------------")
-    print()
-    print("**************************")
-    print("CONFIRM {0}:".format(side.upper()))
-    print("**************************")
+    bid, ask, spread, last = show_quote(con)
 
-    print(tabulate([["PRICE", "", ""], 
-                    [nbr_fmt.format(float(price)), "", "USD"],
+    print_header("CONFIRM {0}:".format(side.upper()))
+
+    print(tabulate([["PRICE", "", ""],
+                    ["", fmt_nbr(float(price)), "USD"],
                     ["", "", ""],
                     ["QUANTITY", "", ""],
-                    [btc_fmt.format(float(quantity)), "", "BTC"],
-                    [nbr_fmt.format(subtotal), "", "USD"], 
+                    ["", fmt_btc(float(quantity)), "BTC"],
+                    ["", fmt_nbr(subtotal), "USD"],
                     ["", "", ""],
-                    ["Subtotal", usd_fmt.format(subtotal), "USD"], 
-                    ["Fee", usd_fmt.format(fee), "USD"],
-                    ["Total", usd_fmt.format(total), "USD"],
-                    ], tablefmt="plain", floatfmt=".8g"))
-    print("--------------------")
+                    ["Subtotal", fmt_usd(subtotal), "USD"],
+                    ["Fee", fmt_usd(fee), "USD"],
+                    ["Total", fmt_usd(total), "USD"],
+                    ], tablefmt="plain", floatfmt=".8g", stralign="right"))
+    print_sep()
 
+    prc = float(price)
     if spread > 0.05:
-        print("WARNING: Spread: {0}".format(usd_fmt.format(spread)))
+        print("WARNING: Spread: {0}".format(fmt_usd(spread)))
     if side == "buy":
         if prc > ask:
-            print("WARNING: Buy price ({0}) is higher than ask ({1}) - TAKER".format(usd_fmt.format(prc), usd_fmt.format(ask)))
+            print("WARNING: Buy price ({0}) is higher than ask ({1}) - TAKER".format(fmt_usd(prc), fmt_usd(ask)))
         if prc < (bid * .9):
-            print("WARNING: Buy price ({0}) is > 10% under current bid ({1})".format(usd_fmt.format(prc), usd_fmt.format(ask)))
+            print("WARNING: Buy price ({0}) is > 10% under current bid ({1})".format(fmt_usd(prc), fmt_usd(ask)))
     if side == "sell":
         if prc < bid:
-            print("WARNING: Sell price ({0}) is lower than bid ({1}) - TAKER".format(usd_fmt.format(prc), usd_fmt.format(bid)))
+            print("WARNING: Sell price ({0}) is lower than bid ({1}) - TAKER".format(fmt_usd(prc), fmt_usd(bid)))
         if prc > (ask * 1.1):
-            print("WARNING: Sell price ({0}) is > 10% over the current ask ({1})".format(usd_fmt.format(prc), usd_fmt.format(bid)))
+            print("WARNING: Sell price ({0}) is > 10% over the current ask ({1})".format(fmt_usd(prc), fmt_usd(bid)))
 
     ok = input("Execute Order? (yes/no) ")
     if ok != "yes" and ok != "y":
         print("skipping order")
         return False
 
-    res = con.new_order(amount=amount_btc, price=price, side=side, options=["maker-or-cancel"])
+    res = con.new_order(amount=quantity, price=price, side=side, options=["maker-or-cancel"])
     order = res.json()
 
     if res.status_code != 200:
@@ -177,12 +358,12 @@ def execute_order(side, price, quantity, subtotal, fee, total):
 
         extra_fee = subtotal * taker_fee_delta
 
-        ok = input("Resubmit order with additional TAKER fee of {0}?? (yes/no) ".format(usd_fmt.format(extra_fee)))
+        ok = input("Resubmit order with additional TAKER fee of {0}?? (yes/no) ".format(fmt_usd(extra_fee)))
         if ok != "yes" and ok != "y":
             print("skipping order")
             return False
 
-        res = con.new_order(amount=amount_btc, price=price, side=side)
+        res = con.new_order(amount=quantity, price=price, side=side)
         order = res.json()
 
         if res.status_code != 200:
@@ -196,160 +377,237 @@ def execute_order(side, price, quantity, subtotal, fee, total):
     print("OK!")
     print_orders([res.json()])
 
-def print_help():
-        cmds = [
-                ["buy", "buy in USD quantity (including fee)"],
-                ["buy btc", "buy in BTC quantity"],
-                ["sell", "buy in USD quantity (including fee)"],
-                ["sell btc", "sell in BTC quantity"],
-                ["list", "list open orders"],
-                ["tick", "price quote"],
-                ["cancel", "cancel order id"],
-                ["cancel all", "cancel all open orders"],
-                ["bal", "balances and available amounts"],
-                ["exit", "exit the console app"],
-                ]
-        print(tabulate(cmds, headers=["command", "info"]))
+def cancel_order(con):
+    order_id = input("order_id: ")
+    if not order_id.isnumeric():
+        print("invalid order_id")
+        return
 
-con = init()
-cmd = ''
-while True:
+    res = con.cancel_order(order_id)
 
-    print()
-    cmd = input("$ > ")
+    if res.status_code != 200:
+        print(res.json())
+    else:
+        print("Cancelled order_id: {0}".format(order_id))
 
-    if cmd == 'buy':
-        side = 'buy'
-        quantity_unit = "USD"
-
-        price, amount_usd = get_price_quantity(side, quantity_unit)
-        if price is None or amount_usd is None:
-            continue
-
-        subtotal = float(amount_usd) / (1 + fee_pct)
-        fee = subtotal * fee_pct
-        total = subtotal + fee
-
-        amount_btc = btc_fmt.format(subtotal / float(price))
-
-        execute_order(side, 
-                price=price, 
-                quantity=amount_btc, 
-                subtotal=subtotal, 
-                fee=fee, 
-                total=total)
-
-    elif cmd == 'buy btc':
-        side = 'buy'
-        quantity_unit = "BTC"
-
-        price, amount_btc = get_price_quantity(side, quantity_unit)
-        if price is None or amount_btc is None:
-            continue
-
-        subtotal = float(amount_btc) * float(price)
-        fee = subtotal * fee_pct
-        total = subtotal + fee
-
-        execute_order(side, 
-                price=price, 
-                quantity=amount_btc, 
-                subtotal=subtotal, 
-                fee=fee, 
-                total=total)
-
-    elif cmd == 'sell':
-        side = 'sell'
-        quantity_unit = "USD"
-
-        price, amount_usd = get_price_quantity(side, quantity_unit)
-        if price is None or amount_usd is None:
-            continue
-
-        subtotal = float(amount_usd) / (1 - fee_pct)
-        fee = subtotal * fee_pct
-        total = subtotal - fee
-        
-        amount_btc = btc_fmt.format((float(subtotal) / float(price)))
-
-        execute_order(side, 
-                price=price, 
-                quantity=amount_btc, 
-                subtotal=subtotal, 
-                fee=fee, 
-                total=total)
-
-    elif cmd == 'sell btc':
-        side = 'sell'
-        quantity_unit = "BTC"
-
-        price, amount_btc = get_price_quantity(side, quantity_unit)
-        if price is None or amount_btc is None:
-            continue
-
-        subtotal = float(amount_btc) * float(price)
-        fee = subtotal * fee_pct
-        total = subtotal - fee
-
-        execute_order(side, 
-                price=price, 
-                quantity=amount_btc, 
-                subtotal=subtotal, 
-                fee=fee, 
-                total=total)
-
-    elif cmd == 'cancel':
-        order_id = input("order_id: ")
-        if not order_id.isnumeric():
-            print("invalid order_id")
-            continue
-
-        res = con.cancel_order(order_id)
-
-        if res.status_code != 200:
-            print(res.json())
-        else:
-            print("Cancelled order_id: {0}".format(order_id))
-
-    elif cmd == 'cancel all':
-        res = con.cancel_all()
+def cancel_all(con):
+    res = con.cancel_all()
+    if res.status_code != 200:
+        print(res.json())
+    else:
         print("all orders cancelled")
 
-    elif cmd == 'tick':
-        res = con.pubticker(symbol="btcusd")
-        if res.status_code != 200:
-            print("ERROR STATUS: {0}".format(res.status_code))
-            print(res.json())
+def show_fees(con):
+    # note first monnth of API usage shows 0% maker fees, but limit orders must reserve the 
+    # normal fee amount so they can be executed after the first month with fees reserved
+    res = con.fees()
+    if res.status_code != 200:
+        print("ERROR STATUS: {0}".format(res.status_code))
+        print(res.json())
+    else:
+        fee = res.json()
+
+        api_fee_headers = ["API Maker Fee", "API Taker Fee", "Delta"]
+        api_maker_fee = float(fee["api_maker_fee_bps"]/100)
+        api_taker_fee = float(fee["api_taker_fee_bps"]/100)
+        api_taker_fee_delta = api_taker_fee - api_maker_fee
+        api_fees = [[
+                fmt_pct(api_maker_fee),
+                fmt_pct(api_taker_fee),
+                fmt_pct(api_taker_fee_delta),
+                ]]
+
+        web_fee_headers = ["Web Maker Fee", "Web Taker Fee", "Delta"]
+        web_maker_fee = float(fee["web_maker_fee_bps"]/100)
+        web_taker_fee = float(fee["web_taker_fee_bps"]/100)
+        web_taker_fee_delta = web_taker_fee - web_maker_fee
+        web_fees = [[
+                fmt_pct(web_maker_fee),
+                fmt_pct(web_taker_fee),
+                fmt_pct(web_taker_fee_delta),
+                ]]
+
+        print()
+        print("FEES")
+        print_sep()
+        print(tabulate(web_fees, headers=web_fee_headers, stralign="right"))
+        print_sep()
+        print(tabulate(api_fees, headers=api_fee_headers, stralign="right"))
+        print_sep()
+
+def print_list(items, headers):
+    l = []
+    for o in items:
+        item = []
+        for h in headers:
+            item.append(o[h])
+        l.append(item)
+
+    #print(l)
+    #print()
+    print(tabulate(l, headers=headers, floatfmt=".8g"))
+    #print(tabulate(l, headers=headers))
+
+def print_sep():
+    print("-----------------------------------------------------------------------------")
+
+def print_header(title):
+    print()
+    print("**********************************")
+    print(title)
+    print("**********************************")
+
+def fmt_usd(val):
+    return locale.currency(val, grouping=True)
+
+def fmt_btc(val):
+    return "{:.8f}".format(val)
+
+def fmt_nbr(val):
+    return "{:,.2f}".format(val)
+
+def fmt_pct(val):
+    return "{:.2f}%".format(val)
+
+def is_float(s):
+    try :
+        float(s)
+        return True
+    except :
+        return False
+
+def init():
+    os.system('clear')
+
+    api_key = ''
+    secret_key = ''
+    live = False
+    first = True
+
+    while True:
+        if first:
+            first = False
+        else:
+            print()
+            again = input("Try again? (yes/no) ")
+            if again != "yes" and again != "y":
+                exit()
+
+        print()
+        print_sep()
+        print("GEMINI API LOGIN")
+        print_sep()
+
+        site = input("Which Exchange? [live | sandbox] ")
+        live = site == "live"
+
+        api_key = input("api_key: ")
+        secret_key = getpass.getpass("secret_key: ")
+
+        ok = len(api_key) > 0 and len (secret_key) > 0
+        if not live and not ok:
+            # load the default sandbox creds if avail
+            try:
+                with open(r'sandbox.yaml') as file:
+                    creds = yaml.load(file, Loader=yaml.FullLoader)
+
+                    if not live and api_key == '':
+                        api_key = creds["api_key"]
+                    if not live and secret_key == '':
+                        secret_key = creds["secret_key"]
+            except:
+                print()
+                print("Warning: unable to read default creds from sandbox.yaml")
+                print(" - see README.md for how to setup a default sandbox.yaml")
+
+        ok = len(api_key) > 0 and len (secret_key) > 0
+        if not ok:
+            print()
+            print("Error: invalid keys.")
             continue
 
-        tick = res.json()
-        tick["spread"] = float(tick["ask"]) - float(tick["bid"])
-        print_tick(tick)
-
-    elif cmd == 'list':
-        res = con.active_orders()
-        if res.status_code != 200:
-            print("ERROR STATUS: {0}".format(res.status_code))
-            print(res.json())
-            continue
-
-        print_orders(res.json())
-
-    elif cmd == 'bal':
+        con = Geminipy(api_key=api_key, secret_key=secret_key, live=live)
         res = con.balances()
         if res.status_code != 200:
+            print()
             print("ERROR STATUS: {0}".format(res.status_code))
             print(res.json())
             continue
-        print_list(res.json(), ["type", "currency", "amount", "available"])
 
-    elif cmd == 'quit' or cmd == 'q' or cmd == 'exit':
-        print("Have a good one!")
-        break
+        #got keys
+        os.system('clear')
+        print()
 
-    elif cmd == 'help' or cmd == '?':
-        print_help()
+        if live:
+            print("***************************")
+            print("****      GEMINI       ****")
+            print("****   LIVE EXCHANGE   ****")
+            print("***************************")
+        else:
+            print("***************************")
+            print("****      GEMINI       ****")
+            print("****      SANDBOX      ****")
+            print("***************************")
 
-    else:
-        print_help()
+        show_balances(con)
+        show_history(con, history=False, stats=True)
+        show_orders(con)
+        show_quote(con)
 
+        print()
+        print("help or ? for commands")
+
+        return con
+
+def main():
+    con = init()
+    cmd = ''
+    while True:
+
+        print()
+        cmd = input("$ > ")
+
+        if cmd == 'buy':
+            buy(con)
+
+        elif cmd == 'buy btc':
+            buy_btc(con)
+
+        elif cmd == 'sell':
+            sell(con)
+
+        elif cmd == 'sell btc':
+            sell_btc(con)
+
+        elif cmd == 'cancel':
+            cancel_order(con)
+
+        elif cmd == 'cancel all':
+            cancel_all(con)
+
+        elif cmd == 'tick' or cmd == 'quote':
+            show_quote(con)
+
+        elif cmd == 'list' or cmd == 'orders' or cmd == 'active':
+            show_orders(con)
+
+        elif cmd == 'past' or cmd == 'history':
+            show_history(con, history=True, stats=True)
+
+        elif cmd == 'stat' or cmd == 'stats':
+            show_history(con, history=False, stats=True)
+
+        elif cmd == 'bal' or cmd == 'balances':
+            show_balances(con)
+
+        elif cmd == 'fees':
+            show_fees(con)
+
+        elif cmd == 'quit' or cmd == 'q' or cmd == 'exit':
+            print("Have a good one!")
+            break
+
+        else:
+            show_help()
+
+main()
