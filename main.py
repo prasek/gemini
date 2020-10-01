@@ -1,14 +1,14 @@
-import os
 from gemini import Geminipy
 from tabulate import tabulate
 from decimal import Decimal
+from datetime import datetime
+import os
 import yaml
 import getpass
 import locale
-from datetime import datetime
 
-api_maker_fee =    0.0010
-taker_fee_delta =  0.0025
+API_MAKER_FEE =    0.0010
+TAKER_FEE_DELTA =  0.0025
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
 def show_help():
@@ -30,6 +30,22 @@ def show_help():
         print(tabulate(cmds, headers=["command", "info"]))
 
 def show_balances(con):
+    account_value, available_to_trade_usd, available_to_trade_btc = get_balances(con)
+
+    headers = ["Notational Account Value", "Available to Trade (USD)", "Available to Trade (BTC)"]
+    data = [[
+            fmt_usd(account_value),
+            fmt_usd(available_to_trade_usd),
+            fmt_btc(available_to_trade_btc),
+            ]]
+
+    print()
+    print("BALANCES")
+    print_sep()
+    print(tabulate(data, headers=headers, floatfmt=".8g", stralign="right"))
+    print_sep()
+
+def get_balances(con):
     bid, ask, spread, last = get_quote(con)
     if bid < 0:
         print("Error: bid unavailable")
@@ -39,6 +55,7 @@ def show_balances(con):
     if res.status_code != 200:
         print("ERROR STATUS: {0}".format(res.status_code))
         print(res.json())
+        return -1, -1, -1
     else:
         headers = ["currency", "amount", "available"]
         balances = res.json()
@@ -65,24 +82,7 @@ def show_balances(con):
                 item.append(b[h])
             l.append(item)
 
-        #print()
-        #print("BALANCES")
-        #print_sep()
-        #print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
-        #print_sep()
-
-        headers = ["Notational Account Value", "Available to Trade (USD)", "Available to Trade (BTC)"]
-        data = [[
-                fmt_usd(account_value),
-                fmt_usd(available_to_trade_usd),
-                fmt_btc(available_to_trade_btc),
-                ]]
-
-        print()
-        print("BALANCES")
-        print_sep()
-        print(tabulate(data, headers=headers, floatfmt=".8g", stralign="right"))
-        print_sep()
+        return account_value, available_to_trade_usd, available_to_trade_btc
 
 def show_orders(con):
     res = con.active_orders()
@@ -212,12 +212,12 @@ def buy(con):
     side = 'buy'
     quantity_unit = "USD"
 
-    price, amount_usd = get_price_quantity(side, quantity_unit)
+    price, amount_usd = get_price_quantity(con, side, quantity_unit)
     if price is None or amount_usd is None:
         return
 
-    subtotal = float(amount_usd) / (1 + api_maker_fee)
-    fee = subtotal * api_maker_fee
+    subtotal = float(amount_usd) / (1 + API_MAKER_FEE)
+    fee = subtotal * API_MAKER_FEE
     total = subtotal + fee
 
     amount_btc = fmt_btc(subtotal / float(price))
@@ -234,12 +234,12 @@ def buy_btc(con):
     side = 'buy'
     quantity_unit = "BTC"
 
-    price, amount_btc = get_price_quantity(side, quantity_unit)
+    price, amount_btc = get_price_quantity(con, side, quantity_unit)
     if price is None or amount_btc is None:
         return
 
     subtotal = float(amount_btc) * float(price)
-    fee = subtotal * api_maker_fee
+    fee = subtotal * API_MAKER_FEE
     total = subtotal + fee
 
     execute_order(con,
@@ -254,12 +254,12 @@ def sell(con):
     side = 'sell'
     quantity_unit = "USD"
 
-    price, amount_usd = get_price_quantity(side, quantity_unit)
+    price, amount_usd = get_price_quantity(con, side, quantity_unit)
     if price is None or amount_usd is None:
         return
 
-    subtotal = float(amount_usd) / (1 - api_maker_fee)
-    fee = subtotal * api_maker_fee
+    subtotal = float(amount_usd) / (1 - API_MAKER_FEE)
+    fee = subtotal * API_MAKER_FEE
     total = subtotal - fee
 
     amount_btc = fmt_btc((float(subtotal) / float(price)))
@@ -276,12 +276,12 @@ def sell_btc(con):
     side = 'sell'
     quantity_unit = "BTC"
 
-    price, amount_btc = get_price_quantity(side, quantity_unit)
+    price, amount_btc = get_price_quantity(con, side, quantity_unit)
     if price is None or amount_btc is None:
         return
 
     subtotal = float(amount_btc) * float(price)
-    fee = subtotal * api_maker_fee
+    fee = subtotal * API_MAKER_FEE
     total = subtotal - fee
 
     execute_order(con,
@@ -292,10 +292,24 @@ def sell_btc(con):
             fee=fee,
             total=total)
 
-def get_price_quantity(side, quantity_unit):
+def get_price_quantity(con, side, quantity_unit):
         print(side.upper())
-        price = input("Price (USD): ")
         quantity = input("Quantity ({0}): ".format(quantity_unit))
+        price = input("Price (USD): ")
+
+        if price == "market":
+            bid, ask, spread, last = get_quote(con)
+            if side == "buy":
+                price = str(ask + 10)
+            if side == "sell":
+                price = str(bid - 10)
+
+        if quantity == "max":
+            account_value, available_to_trade_usd, available_to_trade_btc = get_balances(con)
+            if side == "buy" and quantity_unit == "USD":
+                quantity = str(available_to_trade_usd)
+            if side == "sell" and quantity_unit == "BTC":
+                quantity = str(available_to_trade_btc)
 
         if not is_float(price) or not is_float(quantity):
             print("invalid price or quantity")
@@ -356,7 +370,7 @@ def execute_order(con, side, price, quantity, subtotal, fee, total):
         print("AUTO CANCELLED - MAKER FEE NOT AVAILABLE!")
         print()
 
-        extra_fee = subtotal * taker_fee_delta
+        extra_fee = subtotal * TAKER_FEE_DELTA
 
         ok = input("Resubmit order with additional TAKER fee of {0}?? (yes/no) ".format(fmt_usd(extra_fee)))
         if ok != "yes" and ok != "y":
