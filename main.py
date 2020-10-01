@@ -7,8 +7,9 @@ import yaml
 import getpass
 import locale
 
-API_MAKER_FEE =    0.0010
-TAKER_FEE_DELTA =  0.0025
+MAX_API_MAKER_FEE =  0.0010
+MAX_API_TAKER_FEE =  0.0035
+MAX_API_TAKER_FEE_DELTA =  MAX_API_TAKER_FEE - MAX_API_MAKER_FEE
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
 def show_help():
@@ -216,8 +217,8 @@ def buy(con):
     if price is None or amount_usd is None:
         return
 
-    subtotal = float(amount_usd) / (1 + API_MAKER_FEE)
-    fee = subtotal * API_MAKER_FEE
+    subtotal = float(amount_usd) / (1 + MAX_API_MAKER_FEE)
+    fee = subtotal * MAX_API_MAKER_FEE
     total = subtotal + fee
 
     amount_btc = fmt_btc(subtotal / float(price))
@@ -239,7 +240,7 @@ def buy_btc(con):
         return
 
     subtotal = float(amount_btc) * float(price)
-    fee = subtotal * API_MAKER_FEE
+    fee = subtotal * MAX_API_MAKER_FEE
     total = subtotal + fee
 
     execute_order(con,
@@ -258,8 +259,8 @@ def sell(con):
     if price is None or amount_usd is None:
         return
 
-    subtotal = float(amount_usd) / (1 - API_MAKER_FEE)
-    fee = subtotal * API_MAKER_FEE
+    subtotal = float(amount_usd) / (1 - MAX_API_MAKER_FEE)
+    fee = subtotal * MAX_API_MAKER_FEE
     total = subtotal - fee
 
     amount_btc = fmt_btc((float(subtotal) / float(price)))
@@ -281,7 +282,7 @@ def sell_btc(con):
         return
 
     subtotal = float(amount_btc) * float(price)
-    fee = subtotal * API_MAKER_FEE
+    fee = subtotal * MAX_API_MAKER_FEE
     total = subtotal - fee
 
     execute_order(con,
@@ -299,10 +300,22 @@ def get_price_quantity(con, side, quantity_unit):
 
         if price == "market":
             bid, ask, spread, last = get_quote(con)
+            max_over_under = input("Max over/under bid/ask (default: 0): ")
+            if len(max_over_under) == 0:
+                max_over_under = 0
+            else:
+                if not is_float(max_over_under):
+                    print("Error: not a valid USD value.")
+                    return None, None
+                max_over_under = float(max_over_under)
+            if max_over_under < 0:
+                print("Error: must be > 0.")
+                return None, None
+
             if side == "buy":
-                price = str(ask + 10)
+                price = str(ask + max_over_under)
             if side == "sell":
-                price = str(bid - 10)
+                price = str(bid - max_over_under)
 
         if quantity == "max":
             account_value, available_to_trade_usd, available_to_trade_btc = get_balances(con)
@@ -370,7 +383,7 @@ def execute_order(con, side, price, quantity, subtotal, fee, total):
         print("AUTO CANCELLED - MAKER FEE NOT AVAILABLE!")
         print()
 
-        extra_fee = subtotal * TAKER_FEE_DELTA
+        extra_fee = subtotal * MAX_API_TAKER_FEE_DELTA
 
         ok = input("Resubmit order with additional TAKER fee of {0}?? (yes/no) ".format(fmt_usd(extra_fee)))
         if ok != "yes" and ok != "y":
@@ -411,34 +424,44 @@ def cancel_all(con):
     else:
         print("all orders cancelled")
 
-def show_fees(con):
+def get_fees(con):
     # note first monnth of API usage shows 0% maker fees, but limit orders must reserve the 
     # normal fee amount so they can be executed after the first month with fees reserved
     res = con.fees()
     if res.status_code != 200:
         print("ERROR STATUS: {0}".format(res.status_code))
         print(res.json())
+        return -1, -1, -1, -1
     else:
         fee = res.json()
 
-        api_fee_headers = ["API Maker Fee", "API Taker Fee", "Delta"]
         api_maker_fee = float(fee["api_maker_fee_bps"]/100)
         api_taker_fee = float(fee["api_taker_fee_bps"]/100)
-        api_taker_fee_delta = api_taker_fee - api_maker_fee
-        api_fees = [[
-                fmt_pct(api_maker_fee),
-                fmt_pct(api_taker_fee),
-                fmt_pct(api_taker_fee_delta),
-                ]]
 
-        web_fee_headers = ["Web Maker Fee", "Web Taker Fee", "Delta"]
         web_maker_fee = float(fee["web_maker_fee_bps"]/100)
         web_taker_fee = float(fee["web_taker_fee_bps"]/100)
+
+        return api_maker_fee, api_taker_fee, web_maker_fee, web_taker_fee
+
+def show_fees(con):
+        api_maker_fee, api_taker_fee, web_maker_fee, web_taker_fee = get_fees(con)
+        if api_maker_fee < 0:
+            return
+
         web_taker_fee_delta = web_taker_fee - web_maker_fee
+        web_fee_headers = ["Web Maker Fee", "Web Taker Fee", "Delta"]
         web_fees = [[
                 fmt_pct(web_maker_fee),
                 fmt_pct(web_taker_fee),
                 fmt_pct(web_taker_fee_delta),
+                ]]
+
+        api_taker_fee_delta = api_taker_fee - api_maker_fee
+        api_fee_headers = ["API Maker Fee", "API Taker Fee", "Delta"]
+        api_fees = [[
+                fmt_pct(api_maker_fee),
+                fmt_pct(api_taker_fee),
+                fmt_pct(api_taker_fee_delta),
                 ]]
 
         print()
