@@ -4,9 +4,19 @@ from decimal import Decimal
 from datetime import datetime
 import os
 import yaml
+import csv
 import getpass
 import locale
 
+SIDE_BUY = "buy"
+SIDE_SELL = "sell"
+TYPE_LIMIT = "exchange limit"
+OPTION_MAKER_OR_CANCEL = "maker-or-cancel"
+SYMBOL_BTCUSD = "btcusd"
+FORMAT_TABLE = "table"
+FORMAT_CSV= "csv"
+UNIT_BTC = "BTC"
+UNIT_USD = "USD"
 MAX_API_MAKER_FEE =  0.0010
 MAX_API_TAKER_FEE =  0.0035
 MAX_API_TAKER_FEE_DELTA =  MAX_API_TAKER_FEE - MAX_API_MAKER_FEE
@@ -22,13 +32,196 @@ def show_help():
                 ["buy btc", "buy in BTC quantity"],
                 ["sell", "buy in USD quantity (including fee)"],
                 ["sell btc", "sell in BTC quantity"],
-                ["cancel", "cancel order id"],
+                ["status", "order status"],
+                ["cancel", "cancel order"],
                 ["cancel all", "cancel all open orders"],
+                ["cancel replace", "cancel and replace an order"],
                 ["past", "list past trades - [alt: history]"],
+                ["export history", "export history to csv"],
                 ["fees", "show fees"],
                 ["exit", "exit the console app"],
                 ]
         print(tabulate(cmds, headers=["command", "info"]))
+
+
+def load_order(con, order_id):
+    res = con.order_status(order_id)
+    if res.status_code != 200:
+        return False, res
+
+    order_status = res.json()
+
+    side = order_status["side"]
+    price = float(order_status["price"])
+    quantity = float(order_status["remaining_amount"])
+
+    o = Order(con, side=side, price=price,quantity=quantity, quantity_unit=UNIT_BTC, order_status=order_status)
+    o.set_order_status(order_status)
+
+    return True, o
+
+class Order:
+    def __init__(self, con, side, price, quantity, quantity_unit=UNIT_USD, order_status=None):
+        self.con = con
+        self.user_side = side
+        self.user_price = price
+        self.user_quantity = quantity
+        self.user_quantity_unit = quantity_unit
+        self.btc_amount = -1.0
+        self.subtotal = 0.0
+        self.maker_fee = 0.0
+        self.taker_fee = 0.0
+        self.fee = 0.0
+        self.total = 0.0
+
+        self.maker_or_cancel = True
+        self.prepared = False
+
+    def is_valid(self):
+        ok = (
+                self.user_price > 0
+                and self.user_quantity > 0
+                and (self.user_quantity_unit == UNIT_BTC or self.user_quantity_unit == UNIT_USD)
+                and (self.user_side == SIDE_BUY or self.user_side == SIDE_SELL)
+                )
+
+        return ok
+
+    def is_prepared(self):
+        ok = (
+                self.prepared
+                and self.btc_amount > 0
+                )
+
+        return ok
+
+    def set_price(self, price):
+        if not is_float(price):
+            return False, {"error": "new price is not float"}
+        self.user_price = float(price)
+        self.prepared = False
+
+        return True, None
+
+    def set_maker_or_cancel(self, required):
+        self.maker_or_cancel = bool(required)
+        self.prepared = False
+
+    def prepare(self):
+        self.price = self.user_price
+
+        if self.user_quantity_unit == UNIT_USD:
+            self.btc_amount = self.user_quantity / self.price
+        elif self.user_quantity_unit == UNIT_BTC:
+            self.btc_amount = self.user_quantity
+        else:
+            raise Exception("invalid quantity unit" + self.user_quantity_unit)
+
+        self.subtotal = self.btc_amount * self.price
+
+        api_maker_fee, api_taker_fee, web_maker_fee, web_taker_fee = get_fees(self.con)
+        if api_maker_fee < 0:
+            raise Exception("invalid api_fees" + api_maker_fee)
+
+
+        self.maker_fee = self.subtotal * api_maker_fee
+        self.taker_fee = self.subtotal * api_taker_fee
+
+        if self.maker_or_cancel:
+            self.fee = self.maker_fee
+        else:
+            self.fee = self.taker_fee
+
+        self.total = self.subtotal + self.fee
+        self.prepared = True
+
+    def cancel_and_replace(self):
+        res = self.con.cancel_order(self.order_id)
+        if res.status_code != 200:
+            return False, res
+
+        res = self.con.order_status(self.order_id)
+        if res.status_code != 200:
+            return False, res
+
+        order_status = res.json()
+
+        side = order_status["side"]
+        remaining_amount = float(order_status["remaining_amount"])
+
+        self.user_quantity = remaining_amount
+        self.user_quantity_unit = UNIT_BTC
+
+        self.prepare()
+
+        return self.execute()
+
+    def execute(self):
+        if not self.is_valid():
+            raise Exception("Error: order not valid")
+
+        if not self.is_prepared():
+            raise Exception("Error: order not prepared")
+
+        options = []
+        if self.maker_or_cancel:
+            options.append(OPTION_MAKER_OR_CANCEL)
+
+        res = self.con.new_order(amount=self.btc_amount, price=self.user_price, side=self.user_side, options=options)
+
+        if res.status_code != 200:
+            return False, res
+
+        order_status = res.json()
+        self.set_order_status(order_status)
+        return True, res
+
+    def set_order_status(self, o):
+        self.order_id = int(o["order_id"])
+        self.timestamp = o["timestamp"]
+        self.side = o["side"]
+        self.type = o["type"]
+        self.price = float(o["price"])
+        self.original_amount = float(o["original_amount"])
+        self.total = self.price * self.original_amount
+        self.symbol = o["symbol"]
+        self.executed_amount = float(o["executed_amount"])
+        self.avg_execution_price = float(o["avg_execution_price"])
+        self.remaining_amount = float(o["remaining_amount"])
+        self.is_live = o["is_live"]
+        self.is_cancelled = o["is_cancelled"]
+
+    def reset_order_status(self):
+        self.order_id = -1
+        self.timestamp = 0
+        self.side = SIDE_BUY
+        self.type = TYPE_LIMIT
+        self.price = -1.0
+        self.original_amount = 0.0
+        self.symbol = SYMBOL_BTCUSD
+        self.executed_amount = 0.0
+        self.avg_execution_price = 0.0
+        self.remaining_amount = 0.0
+        self.is_live = False
+        self.is_cancelled = False
+
+    def get_order_status(self):
+        o = {}
+        o["order_id"] = self.order_id
+        o["timestamp"] = self.timestamp
+        o["side"] = self.side
+        o["total"] = self.total
+        o["type"] = self.type
+        o["price"] = self.price
+        o["original_amount"] = self.original_amount
+        o["symbol"] = self.symbol
+        o["executed_amount"] = self.executed_amount
+        o["avg_execution_price"] = self.avg_execution_price
+        o["remaining_amount"] = self.remaining_amount
+        o["is_live"] = self.is_live
+        o["is_cancelled"] = self.is_cancelled
+        return o
+
 
 def show_balances(con):
     account_value, available_to_trade_usd, available_to_trade_btc = get_balances(con)
@@ -91,11 +284,65 @@ def show_orders(con):
         print("ERROR STATUS: {0}".format(res.status_code))
         print(res.json())
     else:
+        print()
+        print("OPEN ORDERS")
         orders = res.json()
         print_orders(orders)
 
+def show_order_status(con):
+    order_id = input("order_id: ")
+    ok, o = load_order(con, order_id)
+    if not ok:
+        print("ERROR STATUS: {0}".format(o.status_code))
+        print(o.json())
+        return
+
+    print()
+    print("ORDER STATUS")
+    print_orders([o.get_order_status()])
+
+def cancel_and_replace(con):
+    order_id = input("order_id: ")
+    ok, o = load_order(con, order_id)
+    if not ok:
+        print("ERROR STATUS: {0}".format(o.status_code))
+        print(o.json())
+        return
+
+    if not o.is_live:
+        print("Order is not live.")
+        return
+
+    price = input("new price: ")
+    o.set_price(price)
+    o.prepare()
+    print_sep()
+    print("Side: " + o.user_side)
+    print("Price: " + fmt_usd(o.user_price))
+    print("Quantity: " + fmt_btc(o.user_quantity))
+    print("Subtotal: " + fmt_usd(o.subtotal))
+    print("Fee: " + fmt_usd(o.fee))
+    print("Total: " + fmt_usd(o.total))
+    print_sep()
+
+    print()
+    ok = input("Execute Order? (yes/no) ")
+    if ok != "yes" and ok != "y":
+        print("skipping order")
+        return False
+
+    ok, res = o.cancel_and_replace()
+    if not ok:
+        print("ERROR STATUS: {0}".format(o.status_code))
+        print(o.json())
+        return
+
+    print()
+    print("ORDER REPLACED")
+    print_orders([o.get_order_status()])
+
 def print_orders(orders):
-        headers = ["side", "total", "type", "price", "original_amount", "symbol", "executed_amount", "avg_execution_price", "remaining_amount", "order_id"]
+        headers = ["date", "side", "total", "type", "price", "original_amount", "symbol", "executed_amount", "avg_execution_price", "remaining_amount", "is_live", "is_cancelled", "order_id"]
         l = []
         for o in orders:
             price = float(o["price"])
@@ -104,18 +351,17 @@ def print_orders(orders):
             o["total"] = fmt_usd(total)
             o["price"] = fmt_usd(price)
             o["avg_execution_price"] = fmt_usd(float(o["avg_execution_price"]))
+            o["date"] = fmt_date(datetime.fromtimestamp(int(o["timestamp"])))
             item = []
             for h in headers:
                 item.append(o[h])
             l.append(item)
 
-        print()
-        print("OPEN ORDERS")
         print_sep()
         print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
         print_sep()
 
-def show_history(con, history=True, stats=True):
+def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
     symbol = "btcusd"
     res = con.past_trades(symbol=symbol, limit_trades=1000)
     if res.status_code != 200:
@@ -149,11 +395,29 @@ def show_history(con, history=True, stats=True):
                 buy_quantity += quantity
 
         if history:
-            print()
-            print("HISTORY")
-            print_sep()
-            print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
-            print_sep()
+            if format == FORMAT_TABLE:
+                print()
+                print("HISTORY")
+                print_sep()
+                print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
+                print_sep()
+            elif format == FORMAT_CSV:
+                filename = input("Filename (defauilt: history.csv):")
+                if len(filename) == 0:
+                    filename = "history.csv"
+
+                print()
+                print("writing history to " + filename)
+
+                with open(filename, 'w', newline='') as csvfile:
+                    writer = csv.DictWriter(csvfile, fieldnames=headers, delimiter='\t', extrasaction='ignore')
+
+                    writer.writeheader()
+                    for o in orders:
+                        writer.writerow(o)
+                print("done.")
+            else:
+                print("Invalid format: " + format)
 
         if stats:
             avg_cost_basis = buy_total/buy_quantity
@@ -411,7 +675,6 @@ def cancel_order(con):
         return
 
     res = con.cancel_order(order_id)
-
     if res.status_code != 200:
         print(res.json())
     else:
@@ -425,7 +688,7 @@ def cancel_all(con):
         print("all orders cancelled")
 
 def get_fees(con):
-    # note first monnth of API usage shows 0% maker fees, but limit orders must reserve the 
+    # note first monnth of API usage shows 0% maker fees, but limit orders must reserve the
     # normal fee amount so they can be executed after the first month with fees reserved
     res = con.fees()
     if res.status_code != 200:
@@ -505,6 +768,9 @@ def fmt_nbr(val):
 
 def fmt_pct(val):
     return "{:.2f}%".format(val)
+
+def fmt_date(dt):
+    return dt.strftime("%m/%d/%Y")
 
 def is_float(s):
     try :
@@ -622,14 +888,23 @@ def main():
         elif cmd == 'cancel all':
             cancel_all(con)
 
+        elif cmd == 'cancel replace':
+            cancel_and_replace(con)
+
         elif cmd == 'tick' or cmd == 'quote':
             show_quote(con)
 
         elif cmd == 'list' or cmd == 'orders' or cmd == 'active':
             show_orders(con)
 
+        elif cmd == 'status':
+            show_order_status(con)
+
         elif cmd == 'past' or cmd == 'history':
             show_history(con, history=True, stats=True)
+
+        elif cmd == 'export history':
+            show_history(con, history=True, stats=False, format=FORMAT_CSV)
 
         elif cmd == 'stat' or cmd == 'stats':
             show_history(con, history=False, stats=True)
