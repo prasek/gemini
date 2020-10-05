@@ -43,30 +43,34 @@ def show_help():
                 ]
         print(tabulate(cmds, headers=["command", "info"]))
 
+def new_order(con, side, price, quantity, quantity_unit):
+    return Order(con, side=side, price=price, quantity=quantity, quantity_unit=UNIT_BTC)
 
-def load_order(con, order_id):
+def get_order(con, order_id):
+    status = get_order_status(con, order_id)
+    return Order(con, side=status.get_side(), price=status.get_price(), quantity=status.get_original_amount(), quantity_unit=UNIT_BTC, status=status)
+
+def get_order_status(con, order_id):
     res = con.order_status(order_id)
     if res.status_code != 200:
-        return False, res
+        raise Exception(result_to_dict(res))
 
-    order_status = res.json()
-
-    side = order_status["side"]
-    price = float(order_status["price"])
-    quantity = float(order_status["remaining_amount"])
-
-    o = Order(con, side=side, price=price,quantity=quantity, quantity_unit=UNIT_BTC, order_status=order_status)
-    o.set_order_status(order_status)
-
-    return True, o
+    return OrderStatus(con, res.json())
 
 class Order:
-    def __init__(self, con, side, price, quantity, quantity_unit=UNIT_USD, order_status=None):
+    def __init__(self, con, side, price, quantity, quantity_unit=UNIT_USD, status=None):
         self.con = con
-        self.user_side = side
-        self.user_price = price
-        self.user_quantity = quantity
-        self.user_quantity_unit = quantity_unit
+        self.side = side
+        self.price = price
+        self.quantity = quantity
+        self.quantity_unit = quantity_unit
+        self.status = status
+
+        self.maker_or_cancel = True
+
+        self.reset_calculated()
+
+    def reset_calculated(self):
         self.btc_amount = -1.0
         self.subtotal = 0.0
         self.maker_fee = 0.0
@@ -74,55 +78,104 @@ class Order:
         self.fee = 0.0
         self.total = 0.0
 
-        self.maker_or_cancel = True
         self.prepared = False
 
-    def is_valid(self):
-        ok = (
-                self.user_price > 0
-                and self.user_quantity > 0
-                and (self.user_quantity_unit == UNIT_BTC or self.user_quantity_unit == UNIT_USD)
-                and (self.user_side == SIDE_BUY or self.user_side == SIDE_SELL)
-                )
+    def assert_valid(self):
+        if not self.price > 0:
+            raise Exception("Invalid price: " + self.price)
 
-        return ok
+        if not self.quantity > 0:
+            raise Exception("Invalid quantity: " + self.quantity)
 
-    def is_prepared(self):
+        if not (self.quantity_unit == UNIT_BTC or self.quantity_unit == UNIT_USD):
+            raise Exception("Invalid quantity unit" + self.quantity_unit)
+
+        if not (self.side == SIDE_BUY or self.side == SIDE_SELL):
+            raise Exception("Invalid side" + self.side)
+
+    def assert_prepared(self):
         ok = (
                 self.prepared
                 and self.btc_amount > 0
                 )
 
-        return ok
+        if not ok:
+            raise Exception("Not prepared.")
+
+    def get_side(self):
+        return self.side
+
+    def set_side(self, side):
+        if not (side == SIDE_BUY or side == SIDE_SELL):
+            raise Exception("Invalid side: " + side)
+
+        self.side = side
+        self.reset_calculated()
+
+    def get_price(self):
+        return self.price
 
     def set_price(self, price):
-        if not is_float(price):
-            return False, {"error": "new price is not float"}
-        self.user_price = float(price)
-        self.prepared = False
+        self.price = float(price)
+        self.reset_calculated()
 
-        return True, None
+    def get_quantity(self):
+        return self.quantity
+
+    def set_quantity(self, quantity):
+        self.quantity = float(quantity)
+        self.reset_calculated()
+
+    def get_quantity_unit(self):
+        return self.quantity_unit
+
+    def set_quantity_unit(self, unit):
+        if not (unit == UNIT_BTC or unit == UNIT_USD):
+            raise Exception("Invalid quantity unit: " + unit)
+
+        self.quantity_unit = unit
+        self.reset_calculated()
+
+    def get_maker_or_cancel(self):
+        return self.maker_or_cancel
 
     def set_maker_or_cancel(self, required):
         self.maker_or_cancel = bool(required)
-        self.prepared = False
+        self.reset_calculated()
+
+    def get_btc_amount(self):
+        return self.btc_amount
+
+    def get_subtotal(self):
+        return self.subtotal
+
+    def get_maker_fee(self):
+        return self.maker_fee
+
+    def get_taker_fee(self):
+        return self.taker_fee
+
+    def get_fee(self):
+        return self.fee
+
+    def get_total(self):
+        return self.total
 
     def prepare(self):
-        self.price = self.user_price
+        self.assert_valid()
 
-        if self.user_quantity_unit == UNIT_USD:
-            self.btc_amount = self.user_quantity / self.price
-        elif self.user_quantity_unit == UNIT_BTC:
-            self.btc_amount = self.user_quantity
+        if self.quantity_unit == UNIT_BTC:
+            self.btc_amount = self.quantity
+        elif self.quantity_unit == UNIT_USD:
+            self.btc_amount = self.quantity / self.price
         else:
-            raise Exception("invalid quantity unit" + self.user_quantity_unit)
+            raise Exception("Invalid quantity unit: " + self.quantity_unit)
 
         self.subtotal = self.btc_amount * self.price
 
         api_maker_fee, api_taker_fee, web_maker_fee, web_taker_fee = get_fees(self.con)
         if api_maker_fee < 0:
             raise Exception("invalid api_fees" + api_maker_fee)
-
 
         self.maker_fee = self.subtotal * api_maker_fee
         self.taker_fee = self.subtotal * api_taker_fee
@@ -135,93 +188,102 @@ class Order:
         self.total = self.subtotal + self.fee
         self.prepared = True
 
-    def cancel_and_replace(self):
-        res = self.con.cancel_order(self.order_id)
-        if res.status_code != 200:
-            return False, res
-
-        res = self.con.order_status(self.order_id)
-        if res.status_code != 200:
-            return False, res
-
-        order_status = res.json()
-
-        side = order_status["side"]
-        remaining_amount = float(order_status["remaining_amount"])
-
-        self.user_quantity = remaining_amount
-        self.user_quantity_unit = UNIT_BTC
-
-        self.prepare()
-
-        return self.execute()
-
     def execute(self):
-        if not self.is_valid():
-            raise Exception("Error: order not valid")
-
-        if not self.is_prepared():
-            raise Exception("Error: order not prepared")
+        self.assert_valid()
+        self.assert_prepared()
 
         options = []
         if self.maker_or_cancel:
             options.append(OPTION_MAKER_OR_CANCEL)
 
-        res = self.con.new_order(amount=self.btc_amount, price=self.user_price, side=self.user_side, options=options)
+        res = self.con.new_order(amount=self.btc_amount, price=self.price, side=self.side, options=options)
 
         if res.status_code != 200:
-            return False, res
+            raise Exception(result_to_dict(res))
 
-        order_status = res.json()
-        self.set_order_status(order_status)
-        return True, res
+        self.status = OrderStatus(self.con, res.json())
 
-    def set_order_status(self, o):
-        self.order_id = int(o["order_id"])
-        self.timestamp = o["timestamp"]
-        self.side = o["side"]
-        self.type = o["type"]
-        self.price = float(o["price"])
-        self.original_amount = float(o["original_amount"])
-        self.total = self.price * self.original_amount
-        self.symbol = o["symbol"]
-        self.executed_amount = float(o["executed_amount"])
-        self.avg_execution_price = float(o["avg_execution_price"])
-        self.remaining_amount = float(o["remaining_amount"])
-        self.is_live = o["is_live"]
-        self.is_cancelled = o["is_cancelled"]
+    def cancel_and_replace(self):
+        if self.status == None:
+            raise Exception("No order to replace.")
 
-    def reset_order_status(self):
-        self.order_id = -1
-        self.timestamp = 0
-        self.side = SIDE_BUY
-        self.type = TYPE_LIMIT
-        self.price = -1.0
-        self.original_amount = 0.0
-        self.symbol = SYMBOL_BTCUSD
-        self.executed_amount = 0.0
-        self.avg_execution_price = 0.0
-        self.remaining_amount = 0.0
-        self.is_live = False
-        self.is_cancelled = False
+        self.status.cancel()
+        self.status.refresh()
 
-    def get_order_status(self):
-        o = {}
-        o["order_id"] = self.order_id
-        o["timestamp"] = self.timestamp
-        o["side"] = self.side
-        o["total"] = self.total
-        o["type"] = self.type
-        o["price"] = self.price
-        o["original_amount"] = self.original_amount
-        o["symbol"] = self.symbol
-        o["executed_amount"] = self.executed_amount
-        o["avg_execution_price"] = self.avg_execution_price
-        o["remaining_amount"] = self.remaining_amount
-        o["is_live"] = self.is_live
-        o["is_cancelled"] = self.is_cancelled
-        return o
+        self.quantity = self.status.get_remaining_amount()
+        self.quantity_unit = UNIT_BTC
 
+        self.prepare()
+
+        return self.execute()
+
+class OrderStatus:
+    def __init__(self, con, data):
+        self.con = con
+        self.data = data
+
+    def get_order_id(self):
+        return int(self.data["order_id"])
+
+    def get_timestamp(self):
+        return datetime.fromtimestamp(self.data["timestamp"])
+
+    def get_side(self):
+        return self.data["side"]
+
+    def get_type(self):
+        return self.data["type"]
+
+    def get_price(self):
+        return float(self.data["price"])
+
+    def get_symbol(self):
+        return float(self.data["symbol"])
+
+    def get_original_amount(self):
+        return float(self.data["original_amount"])
+
+    def get_executed_amount(self):
+        return float(self.data["executed_amount"])
+
+    def get_remaining_amount(self):
+        return float(self.data["remaining_amount"])
+
+    def get_avg_execution_price(self):
+        return float(self.data["avg_execution_price"])
+
+    def is_live(self):
+        return bool(self.data["is_live"])
+
+    def is_cancelled(self):
+        return bool(self.data["is_cancelled"])
+
+    def get_total(self):
+        return self.price() * self.original_amount()
+
+    def refresh(self):
+        res = self.con.order_status(self.get_order_id())
+        if res.status_code != 200:
+            raise Exception(result_to_dict(res))
+
+        self.data = res.json()
+
+    def cancel(self):
+        if self.is_cancelled():
+            raise Exception("Order already cancelled.")
+
+        res = self.con.cancel_order(self.get_order_id())
+        if res.status_code != 200:
+            raise Exception(result_to_dict(res))
+
+    def to_dict(self):
+        return self.data
+
+def result_to_dict(res):
+    return {"code": res.status_code, "json": res.json()}
+
+def print_err(err):
+    print("ERROR: {0}".format(err))
 
 def show_balances(con):
     account_value, available_to_trade_usd, available_to_trade_btc = get_balances(con)
@@ -290,56 +352,55 @@ def show_orders(con):
         print_orders(orders)
 
 def show_order_status(con):
-    order_id = input("order_id: ")
-    ok, o = load_order(con, order_id)
-    if not ok:
-        print("ERROR STATUS: {0}".format(o.status_code))
-        print(o.json())
-        return
+    try:
+        order_id = input("order_id: ")
+        status = get_order_status(con, order_id)
 
-    print()
-    print("ORDER STATUS")
-    print_orders([o.get_order_status()])
+        print()
+        print("ORDER STATUS")
+        print_orders([status.to_dict()])
+
+    except Exception as err:
+        print_err(err)
+        return
 
 def cancel_and_replace(con):
-    order_id = input("order_id: ")
-    ok, o = load_order(con, order_id)
-    if not ok:
-        print("ERROR STATUS: {0}".format(o.status_code))
-        print(o.json())
+    try:
+        order_id = input("order_id: ")
+        order = get_order(con, order_id)
+
+        if not order.status.is_live():
+            print("Order is not live.")
+            return
+
+        price = input("new price: ")
+        order.set_price(price)
+        order.set_quantity(order.status.get_remaining_amount())
+        order.prepare()
+        print_sep()
+        print("Side: " + order.get_side())
+        print("Price: " + fmt_usd(order.get_price()))
+        print("Quantity: " + fmt_btc(order.get_quantity()))
+        print("Subtotal: " + fmt_usd(order.get_subtotal()))
+        print("Fee: " + fmt_usd(order.get_fee()))
+        print("Total: " + fmt_usd(order.get_total()))
+        print_sep()
+
+        print()
+        ok = input("Execute Order? (yes/no) ")
+        if ok != "yes" and ok != "y":
+            print("skipping order")
+            return
+
+        order.cancel_and_replace()
+
+        print()
+        print("ORDER REPLACED")
+        print_orders([order.status.to_dict()])
+
+    except Exception as err:
+        print_err(err)
         return
-
-    if not o.is_live:
-        print("Order is not live.")
-        return
-
-    price = input("new price: ")
-    o.set_price(price)
-    o.prepare()
-    print_sep()
-    print("Side: " + o.user_side)
-    print("Price: " + fmt_usd(o.user_price))
-    print("Quantity: " + fmt_btc(o.user_quantity))
-    print("Subtotal: " + fmt_usd(o.subtotal))
-    print("Fee: " + fmt_usd(o.fee))
-    print("Total: " + fmt_usd(o.total))
-    print_sep()
-
-    print()
-    ok = input("Execute Order? (yes/no) ")
-    if ok != "yes" and ok != "y":
-        print("skipping order")
-        return False
-
-    ok, res = o.cancel_and_replace()
-    if not ok:
-        print("ERROR STATUS: {0}".format(o.status_code))
-        print(o.json())
-        return
-
-    print()
-    print("ORDER REPLACED")
-    print_orders([o.get_order_status()])
 
 def print_orders(orders):
         headers = ["date", "side", "total", "type", "price", "original_amount", "symbol", "executed_amount", "avg_execution_price", "remaining_amount", "is_live", "is_cancelled", "order_id"]
@@ -670,15 +731,14 @@ def execute_order(con, side, price, quantity, subtotal, fee, total):
 
 def cancel_order(con):
     order_id = input("order_id: ")
-    if not order_id.isnumeric():
-        print("invalid order_id")
+    try:
+        order = get_order(con, order_id)
+        order.status.cancel()
+    except Exception as err:
+        print_err(err)
         return
 
-    res = con.cancel_order(order_id)
-    if res.status_code != 200:
-        print(res.json())
-    else:
-        print("Cancelled order_id: {0}".format(order_id))
+    print("Cancelled order_id: {0}".format(order_id))
 
 def cancel_all(con):
     res = con.cancel_all()
