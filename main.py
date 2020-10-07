@@ -348,6 +348,7 @@ def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
                 print("Invalid format: " + format)
 
         if stats:
+            #TODO: calc realized and unrealized gain/loss
             avg_cost_basis = buy_total/buy_quantity
             bid, ask, spread, last = gemini.get_quote(con)
             perf = ((last / avg_cost_basis) - 1) * 100
