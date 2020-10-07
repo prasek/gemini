@@ -1,4 +1,5 @@
-from gemini import Geminipy
+from api import Geminipy
+import gemini
 from tabulate import tabulate
 from decimal import Decimal
 from datetime import datetime
@@ -6,26 +7,13 @@ import os
 import yaml
 import csv
 import getpass
+import util
 import locale
-import traceback
 
-SIDE_BUY = "buy"
-SIDE_SELL = "sell"
-TYPE_LIMIT = "exchange limit"
-OPTION_MAKER_OR_CANCEL = "maker-or-cancel"
-SYMBOL_BTCUSD = "btcusd"
-UNIT_BTC = "BTC"
-UNIT_USD = "USD"
-RESERVE_FEE_ACTUAL = "actual"
-RESERVE_FEE_MAX = "max"
-RESERVE_FEE_NONE = "none"
-MAX_API_MAKER_FEE =  0.0010
-MAX_API_TAKER_FEE =  0.0035
-MAX_API_TAKER_FEE_DELTA =  MAX_API_TAKER_FEE - MAX_API_MAKER_FEE
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
 FORMAT_TABLE = "table"
 FORMAT_CSV= "csv"
-locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
  
 cmds = [
     ['bal', 'balances and available amounts', lambda con: show_balances(con)],
@@ -46,359 +34,25 @@ cmds = [
     ['exit', 'exit the console app', lambda con: done()],
 ]
 
-def new_order(con, side, price, quantity, unit):
-    return Order(con, side=side, price=price, quantity=quantity, quantity_unit=unit)
-
-def get_order(con, order_id):
-    status = get_order_status(con, order_id)
-    return Order(con, side=status.get_side(), price=status.get_price(), quantity=status.get_original_amount(), quantity_unit=UNIT_BTC, status=status)
-
-def get_order_status(con, order_id):
-    res = con.order_status(order_id)
-    if res.status_code != 200:
-        raise Exception(result_to_dict(res))
-
-    return OrderStatus(con, res.json())
-
-class Order:
-    def __init__(self, con, side, price, quantity, quantity_unit=UNIT_USD, status=None):
-        self.con = con
-        self.side = side
-        self.price = float(price)
-        self.quantity = float(quantity)
-        self.quantity_unit = quantity_unit
-        self.status = status
-
-        self.maker_or_cancel = True
-        self.reserve_api_fees = RESERVE_FEE_ACTUAL
-
-        self.reset_calculated()
-
-    def reset_calculated(self):
-        self.btc_amount = -1.0
-        self.subtotal = 0.0
-        self.maker_fee = 0.0
-        self.taker_fee = 0.0
-        self.fee = 0.0
-        self.total = 0.0
-        self.warnings = []
-
-        self.prepared = False
-
-    def assert_valid(self):
-        if not self.price > 0:
-            raise Exception("Invalid price: " + self.price)
-
-        if not self.quantity > 0:
-            raise Exception("Invalid quantity: " + self.quantity)
-
-        if not (self.quantity_unit == UNIT_BTC or self.quantity_unit == UNIT_USD):
-            raise Exception("Invalid quantity unit" + self.quantity_unit)
-
-        if not (self.side == SIDE_BUY or self.side == SIDE_SELL):
-            raise Exception("Invalid side" + self.side)
-
-    def assert_prepared(self):
-        ok = (
-                self.prepared
-                and self.btc_amount > 0
-                )
-
-        if not ok:
-            raise Exception("Not prepared.")
-
-    def get_side(self):
-        return self.side
-
-    def set_side(self, side):
-        allowed = [SIDE_BUY, SIDE_SELL]
-        if not side in allowed:
-            raise Exception("Side {0} not in {1}".format(side, allowed))
-
-        self.side = side
-        self.reset_calculated()
-
-    def get_price(self):
-        return self.price
-
-    def set_price(self, price):
-        self.price = float(price)
-        self.reset_calculated()
-
-    def get_quantity(self):
-        return self.quantity
-
-    def set_quantity(self, quantity):
-        self.quantity = float(quantity)
-        self.reset_calculated()
-
-    def get_quantity_unit(self):
-        return self.quantity_unit
-
-    def set_quantity_unit(self, unit):
-        allowed = [UNIT_BTC, UNIT_USD]
-        if not unit in allowed:
-            raise Exception("Quantity unit {0} not in {1}".format(unit, allowed))
-
-        self.quantity_unit = unit
-        self.reset_calculated()
-
-    def get_maker_or_cancel(self):
-        return self.maker_or_cancel
-
-    def set_maker_or_cancel(self, required):
-        self.maker_or_cancel = bool(required)
-        self.reset_calculated()
-
-    def get_reserve_api_fees(self):
-        return self.reserve_api_fees
-
-    def set_reserve_api_fees(self, reserve):
-        allowed = [RESERVE_FEE_NONE, RESERVE_FEE_ACTUAL, RESERVE_FEE_MAX]
-        if not reserve in allowed:
-            raise Exception("Reserve type {0} not in {1}".format(reserve, allowed))
-
-        self.reserve_api_fees = reserve
-        self.reset_calculated()
-
-    def get_btc_amount(self):
-        return self.btc_amount
-
-    def get_subtotal(self):
-        return self.subtotal
-
-    def get_maker_fee(self):
-        return self.maker_fee
-
-    def get_taker_fee(self):
-        return self.taker_fee
-
-    def get_fee(self):
-        return self.fee
-
-    def get_total(self):
-        return self.total
-
-    def prepare(self):
-        self.assert_valid()
-
-        # fees to use/reserve
-        api_maker_fee = 0.0
-        api_taker_fee = 0.0
-
-        if self.reserve_api_fees == RESERVE_FEE_ACTUAL:
-            api_maker_fee, api_taker_fee, web_maker_fee, web_taker_fee = get_fees(self.con)
-            api_maker_fee = api_maker_fee / 100
-            api_taker_fee = api_taker_fee / 100
-        elif self.reserve_api_fees == RESERVE_FEE_MAX:
-            api_maker_fee = MAX_API_MAKER_FEE
-            api_taker_fee = MAX_API_TAKER_FEE
-
-        # max fee in use
-        fee_pct = api_taker_fee
-        if self.maker_or_cancel:
-            fee_pct = api_maker_fee
-
-        # btc_amount
-        if self.quantity_unit == UNIT_BTC:
-            self.btc_amount = self.quantity
-
-        elif self.quantity_unit == UNIT_USD:
-            if self.side == SIDE_BUY:
-                self.subtotal = self.quantity / (1 + fee_pct)
-                self.btc_amount= self.subtotal / self.price
-
-            elif self.side == SIDE_SELL:
-                self.subtotal = self.quantity / (1 - fee_pct)
-                self.btc_amount = self.quantity / self.price
-
-            else:
-                raise Exception("Invalid side: " + self.side)
-
-        else:
-            raise Exception("Invalid quantity unit: " + self.quantity_unit)
-
-        self.subtotal = self.btc_amount * self.price
-        self.fee = self.subtotal * fee_pct
-        self.total = self.subtotal + self.fee
-
-        bid, ask, spread, last = get_quote(self.con)
-
-        self.warnings = []
-        if spread > 0.05:
-            self.warnings.append("warning: spread: {0}".format(fmt_usd(spread)))
-        if self.side == SIDE_BUY:
-            if self.price > ask:
-                self.warnings.append("warning: buy price ({0}) is higher than ask ({1}) - TAKER".format(fmt_usd(self.price), fmt_usd(ask)))
-        if self.side == SIDE_SELL:
-            if self.price < bid:
-                self.warnings.append("warning: sell price ({0}) is lower than bid ({1}) - TAKER".format(fmt_usd(self.price), fmt_usd(bid)))
-
-        self.prepared = True
-
-    def get_warnings(self):
-        return self.warnings
-
-    def execute(self):
-        self.assert_valid()
-        self.assert_prepared()
-
-        options = []
-        if self.maker_or_cancel:
-            options.append(OPTION_MAKER_OR_CANCEL)
-
-        res = self.con.new_order(amount=fmt_btc(self.btc_amount), price=self.price, side=self.side, options=options)
-
-        if res.status_code != 200:
-            raise Exception(result_to_dict(res))
-
-        self.status = OrderStatus(self.con, res.json())
-
-    def cancel_and_replace(self):
-        if self.status == None:
-            raise Exception("No order to replace.")
-
-        self.status.cancel()
-        self.status.refresh()
-
-        self.quantity = self.status.get_remaining_amount()
-        self.quantity_unit = UNIT_BTC
-
-        self.prepare()
-
-        return self.execute()
-
-    def get_status(self):
-        return self.status
-
-class OrderStatus:
-    def __init__(self, con, data):
-        self.con = con
-        self.data = data
-
-    def get_order_id(self):
-        return int(self.data["order_id"])
-
-    def get_timestamp(self):
-        return datetime.fromtimestamp(self.data["timestamp"])
-
-    def get_side(self):
-        return self.data["side"]
-
-    def get_type(self):
-        return self.data["type"]
-
-    def get_price(self):
-        return float(self.data["price"])
-
-    def get_symbol(self):
-        return float(self.data["symbol"])
-
-    def get_original_amount(self):
-        return float(self.data["original_amount"])
-
-    def get_executed_amount(self):
-        return float(self.data["executed_amount"])
-
-    def get_remaining_amount(self):
-        return float(self.data["remaining_amount"])
-
-    def get_avg_execution_price(self):
-        return float(self.data["avg_execution_price"])
-
-    def is_live(self):
-        return bool(self.data["is_live"])
-
-    def is_cancelled(self):
-        return bool(self.data["is_cancelled"])
-
-    def get_total(self):
-        return self.price() * self.original_amount()
-
-    def refresh(self):
-        res = self.con.order_status(self.get_order_id())
-        if res.status_code != 200:
-            raise Exception(result_to_dict(res))
-
-        self.data = res.json()
-
-    def cancel(self):
-        if self.is_cancelled():
-            raise Exception("Order already cancelled.")
-
-        res = self.con.cancel_order(self.get_order_id())
-        if res.status_code != 200:
-            raise Exception(result_to_dict(res))
-
-    def to_dict(self):
-        return self.data
-
-def result_to_dict(res):
-    return {"code": res.status_code, "json": res.json()}
-
-def print_err(ex):
-    print("ERROR: {0}".format(ex))
-
-    #print_sep()
-    #traceback.print_exception(type(ex), ex, ex.__traceback__)
-    #print_sep()
-
 def show_balances(con):
     try:
-        account_value, available_to_trade_usd, available_to_trade_btc = get_balances(con)
+        account_value, available_to_trade_usd, available_to_trade_btc = gemini.get_balances(con)
 
         headers = ["Notational Account Value", "Available to Trade (USD)", "Available to Trade (BTC)"]
         data = [[
-                fmt_usd(account_value),
-                fmt_usd(available_to_trade_usd),
-                fmt_btc(available_to_trade_btc),
+                util.fmt_usd(account_value),
+                util.fmt_usd(available_to_trade_usd),
+                util.fmt_btc(available_to_trade_btc),
                 ]]
 
         print()
         print("BALANCES")
-        print_sep()
+        util.print_sep()
         print(tabulate(data, headers=headers, floatfmt=".8g", stralign="right"))
-        print_sep()
+        util.print_sep()
 
-    except Exception as err:
-        print_err(err)
-
-def get_balances(con):
-    bid, ask, spread, last = get_quote(con)
-    if bid < 0:
-        print("Error: bid unavailable")
-        return
-
-    res = con.balances()
-    if res.status_code != 200:
-        raise Exception(result_to_dict(res))
-    else:
-        headers = ["currency", "amount", "available"]
-        balances = res.json()
-
-        account_value = 0.0
-        available_to_trade_usd = 0.0
-        available_to_trade_btc = 0.0
-        l = []
-        for b in balances:
-            currency = b["currency"]
-            amount = float(b["amount"])
-            available = float(b["available"])
-            if currency == "USD":
-                account_value += amount
-                available_to_trade_usd = available
-            elif currency == "BTC":
-                account_value += amount * last
-                available_to_trade_btc = available
-            else:
-                continue
-
-            item = []
-            for h in headers:
-                item.append(b[h])
-            l.append(item)
-
-        return account_value, available_to_trade_usd, available_to_trade_btc
+    except Exception as ex:
+        util.print_err(ex)
 
 def show_orders(con):
     res = con.active_orders()
@@ -414,56 +68,56 @@ def show_orders(con):
 def show_order_status(con):
     try:
         order_id = input("order_id: ")
-        status = get_order_status(con, order_id)
+        status = gemini.get_order_status(con, order_id)
 
         print()
         print("ORDER STATUS")
         print_orders([status.to_dict()])
 
-    except Exception as err:
-        print_err(err)
+    except Exception as ex:
+        util.print_err(ex)
         return
 
 def cancel_and_replace(con):
     try:
         order_id = input("order_id: ")
-        order = get_order(con, order_id)
+        o = gemini.get_order(con, order_id)
 
-        if not order.status.is_live():
+        if not gemini.status.is_live():
             print("Order is not live.")
             return
 
-        price = get_price(con, order.get_side(), order.get_quantity_unit())
-        order.set_price(price)
-        order.set_quantity(order.status.get_remaining_amount())
-        order.prepare()
+        price = get_price(con, o.get_side(), o.get_quantity_unit())
+        o.set_price(price)
+        o.set_quantity(o.status.get_remaining_amount())
+        o.prepare()
 
-        if not confirm_order(order):
+        if not confirm_order(o):
             return
 
-        order.cancel_and_replace()
+        o.cancel_and_replace()
 
-        if order.get_status().is_cancelled():
-            order.set_maker_or_cancel(False)
-            order.prepare()
+        if o.get_status().is_cancelled():
+            o.set_maker_or_cancel(False)
+            o.prepare()
 
             print()
-            ok = input("Accept TAKER fee of {0}?? (yes/no) ".format(fmt_usd(order.get_fee())))
+            ok = input("Accept TAKER fee of {0}?? (yes/no) ".format(util.fmt_usd(o.get_fee())))
             if ok != "yes" and ok != "y":
                 print("skipping order")
                 return False
         
-            if not confirm_order(order):
+            if not confirm_order(o):
                 return
 
-            order.execute()
+            o.execute()
 
         print()
         print("ORDER REPLACED")
-        print_orders([order.status.to_dict()])
+        print_orders([gemini.status.to_dict()])
 
-    except Exception as err:
-        print_err(err)
+    except Exception as ex:
+        util.print_err(ex)
         return
 
 def print_orders(orders):
@@ -473,25 +127,25 @@ def print_orders(orders):
             price = float(o["price"])
             quantity = float(o["original_amount"])
             total = price * quantity
-            o["total"] = fmt_usd(total)
-            o["price"] = fmt_usd(price)
-            o["avg_execution_price"] = fmt_usd(float(o["avg_execution_price"]))
-            o["date"] = fmt_date(datetime.fromtimestamp(int(o["timestamp"])))
+            o["total"] = util.fmt_usd(total)
+            o["price"] = util.fmt_usd(price)
+            o["avg_execution_price"] = util.fmt_usd(float(o["avg_execution_price"]))
+            o["date"] = util.fmt_date(datetime.fromtimestamp(int(o["timestamp"])))
             item = []
             for h in headers:
                 item.append(o[h])
             l.append(item)
 
-        print_sep()
+        util.print_sep()
         print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
-        print_sep()
+        util.print_sep()
 
 def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
     try:
         symbol = "btcusd"
         res = con.past_trades(symbol=symbol, limit_trades=1000)
         if res.status_code != 200:
-            raise Exception(result_to_dict(res))
+            raise Exception(util.result_to_dict(res))
 
         orders = res.json()
         headers = ["date", "type", "total", "price", "amount", "symbol", "fee_amount", "order_id"]
@@ -506,9 +160,9 @@ def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
             total = price * quantity + fees
             dt = datetime.fromtimestamp(o["timestamp"])
             o["date"] = dt.strftime("%m/%d/%Y")
-            o["total"] = fmt_usd(total)
-            o["fee_amount"] = fmt_usd(fees)
-            o["price"] = fmt_usd(price)
+            o["total"] = util.fmt_usd(total)
+            o["fee_amount"] = util.fmt_usd(fees)
+            o["price"] = util.fmt_usd(price)
             o["symbol"] = symbol
             item = []
             for h in headers:
@@ -523,9 +177,9 @@ def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
             if format == FORMAT_TABLE:
                 print()
                 print("HISTORY")
-                print_sep()
+                util.print_sep()
                 print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
-                print_sep()
+                util.print_sep()
             elif format == FORMAT_CSV:
                 filename = input("Filename (defauilt: history.csv):")
                 if len(filename) == 0:
@@ -546,55 +200,42 @@ def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
 
         if stats:
             avg_cost_basis = buy_total/buy_quantity
-            bid, ask, spread, last = get_quote(con)
+            bid, ask, spread, last = gemini.get_quote(con)
             perf = ((last / avg_cost_basis) - 1) * 100
             curr_value = buy_quantity * last
             gain = curr_value - buy_total
 
             headers = ["gain/loss", "gain/loss %", "avg cost basis/btc", "last price", "cost basis", "current value"]
             stats = [[
-                    fmt_usd(gain),
-                    fmt_pct(perf),
-                    fmt_usd(avg_cost_basis),
-                    fmt_usd(last),
-                    fmt_usd(buy_total),
-                    fmt_usd(curr_value),
+                    util.fmt_usd(gain),
+                    util.fmt_pct(perf),
+                    util.fmt_usd(avg_cost_basis),
+                    util.fmt_usd(last),
+                    util.fmt_usd(buy_total),
+                    util.fmt_usd(curr_value),
                     ]]
 
             print()
             print("TRADE STATS")
-            print_sep()
+            util.print_sep()
             print(tabulate(stats, headers=headers, stralign="right"))
-            print_sep()
+            util.print_sep()
 
-    except Exception as err:
-        print_err(err)
-
-def get_quote(con):
-    res = con.pubticker(symbol="btcusd")
-    if res.status_code != 200:
-        raise Exception(result_to_dict(res))
-
-    tick = res.json()
-    ask = float(tick["ask"])
-    bid = float(tick["bid"])
-    last = float(tick["last"])
-    spread = ask - bid
-
-    return bid, ask, spread, last
+    except Exception as ex:
+        util.print_err(ex)
 
 def show_quote(con):
-    bid, ask, spread, last = get_quote(con)
+    bid, ask, spread, last = gemini.get_quote(con)
     if bid < 0:
         return
 
     print()
     print("QUOTE")
-    print_sep()
-    print("{0} ASK".format(fmt_nbr(ask)))
-    print("Spread of {0}, LAST: {1}".format(fmt_nbr(spread), format(fmt_nbr(last))))
-    print("{0} BID".format(fmt_nbr(bid)))
-    print_sep()
+    util.print_sep()
+    print("{0} ASK".format(util.fmt_nbr(ask)))
+    print("Spread of {0}, LAST: {1}".format(util.fmt_nbr(spread), format(util.fmt_nbr(last))))
+    print("{0} BID".format(util.fmt_nbr(bid)))
+    util.print_sep()
 
     return bid, ask, spread, last
 
@@ -602,52 +243,52 @@ def show_quote(con):
 def buy(con):
 
     try:
-        side = SIDE_BUY
-        unit = UNIT_USD
+        side = gemini.SIDE_BUY
+        unit = gemini.UNIT_USD
         price, quantity = get_price_quantity(con, side, unit)
-        order = new_order(con, side, price, quantity, unit)
+        o = gemini.new_order(con, side, price, quantity, unit)
 
-        execute_order(con, order)
+        execute_order(con, o)
 
-    except Exception as err:
-        print_err(err)
+    except Exception as ex:
+        util.print_err(ex)
 
 
 def buy_btc(con):
     try:
-        side = SIDE_BUY
-        unit = UNIT_BTC
+        side = gemini.SIDE_BUY
+        unit = gemini.UNIT_BTC
         price, quantity = get_price_quantity(con, side, unit)
-        order = new_order(con, side, price, quantity, unit)
+        o = gemini.new_order(con, side, price, quantity, unit)
 
-        execute_order(con, order)
+        execute_order(con, o)
 
-    except Exception as err:
-        print_err(err)
+    except Exception as ex:
+        util.print_err(ex)
 
 def sell(con):
     try:
-        side = SIDE_SELL
-        unit = UNIT_USD
+        side = gemini.SIDE_SELL
+        unit = gemini.UNIT_USD
         price, quantity = get_price_quantity(con, side, unit)
-        order = new_order(con, side, price, quantity, unit)
+        o = gemini.new_order(con, side, price, quantity, unit)
 
-        execute_order(con, order)
+        execute_order(con, o)
 
-    except Exception as err:
-        print_err(err)
+    except Exception as ex:
+        util.print_err(ex)
 
 def sell_btc(con):
     try:
-        side = SIDE_SELL
-        unit = UNIT_BTC
+        side = gemini.SIDE_SELL
+        unit = gemini.UNIT_BTC
         price, quantity = get_price_quantity(con, side, unit)
-        order = new_order(con, side, price, quantity, unit)
+        o = gemini.new_order(con, side, price, quantity, unit)
 
-        execute_order(con, order)
+        execute_order(con, o)
 
-    except Exception as err:
-        print_err(err)
+    except Exception as ex:
+        util.print_err(ex)
 
 def get_price_quantity(con, side, unit):
     print("{0} {1}".format(side.upper(), unit))
@@ -659,21 +300,21 @@ def get_price(con, side, unit):
     price = input("Price (USD): ")
 
     if price == "market":
-        bid, ask, spread, last = get_quote(con)
+        bid, ask, spread, last = gemini.get_quote(con)
         max_over_under = input("Max over/under bid/ask (default: 0): ")
         if len(max_over_under) == 0:
             max_over_under = 0
         else:
-            if not is_float(max_over_under):
+            if not util.is_float(max_over_under):
                 raise Exception("Error: not a valid USD value.")
             max_over_under = float(max_over_under)
 
-        if side == SIDE_BUY:
+        if side == gemini.SIDE_BUY:
             price = str(ask + max_over_under)
-        if side == SIDE_SELL:
+        if side == gemini.SIDE_SELL:
             price = str(bid - max_over_under)
 
-    if not is_float(price):
+    if not util.is_float(price):
         raise Exception("Invalid price.")
 
     return price
@@ -682,65 +323,65 @@ def get_quantity(con, side, unit):
     quantity = input("Quantity ({0}): ".format(unit))
 
     if quantity == "max":
-        account_value, available_to_trade_usd, available_to_trade_btc = get_balances(con)
-        if side == SIDE_BUY and unit == UNIT_USD:
+        account_value, available_to_trade_usd, available_to_trade_btc = gemini.get_balances(con)
+        if side == gemini.SIDE_BUY and unit == gemini.UNIT_USD:
             quantity = str(available_to_trade_usd)
-        if side == SIDE_SELL and unit == UNIT_BTC:
+        if side == gemini.SIDE_SELL and unit == gemini.UNIT_BTC:
             quantity = str(available_to_trade_btc)
 
-    if not is_float(quantity):
+    if not util.is_float(quantity):
         raise Exception("Invalid quantity.")
 
     return quantity
 
-def execute_order(con, order):
+def execute_order(con, o):
 
-    order.prepare()
+    o.prepare()
 
-    if not confirm_order(order):
+    if not confirm_order(o):
         return
 
-    order.execute()
+    o.execute()
 
-    if order.get_status().is_cancelled() and order.get_maker_or_cancel():
+    if o.get_status().is_cancelled() and o.get_maker_or_cancel():
         print()
         print("AUTO CANCELLED - MAKER FEE NOT AVAILABLE!")
         print()
 
-        order.set_maker_or_cancel(False)
-        order.prepare()
+        o.set_maker_or_cancel(False)
+        o.prepare()
 
         print()
-        ok = input("Accept TAKER fee of {0}?? (yes/no) ".format(fmt_usd(order.get_fee())))
+        ok = input("Accept TAKER fee of {0}?? (yes/no) ".format(util.fmt_usd(o.get_fee())))
         if ok != "yes" and ok != "y":
             print("skipping order")
             return False
     
-        if not confirm_order(order):
+        if not confirm_order(o):
             return
 
-        order.execute()
+        o.execute()
 
     print()
     print("OK!")
-    print_orders([order.get_status().to_dict()])
+    print_orders([o.get_status().to_dict()])
 
-def confirm_order(order):
-    print_header("CONFIRM {0}:".format(order.get_side().upper()))
+def confirm_order(o):
+    util.print_header("CONFIRM {0}:".format(o.get_side().upper()))
     print(tabulate([["PRICE", "", ""],
-                    ["", fmt_nbr(order.get_price()), UNIT_USD],
+                    ["", util.fmt_nbr(o.get_price()), gemini.UNIT_USD],
                     ["", "", ""],
                     ["QUANTITY", "", ""],
-                    ["", fmt_btc(order.get_btc_amount()), UNIT_BTC],
-                    ["", fmt_nbr(order.get_subtotal()), UNIT_USD],
+                    ["", util.fmt_btc(o.get_btc_amount()), gemini.UNIT_BTC],
+                    ["", util.fmt_nbr(o.get_subtotal()), gemini.UNIT_USD],
                     ["", "", ""],
-                    ["Subtotal", fmt_usd(order.get_subtotal()), UNIT_USD],
-                    ["Fee", fmt_usd(order.get_fee()), UNIT_USD],
-                    ["Total", fmt_usd(order.get_total()), UNIT_USD],
+                    ["Subtotal", util.fmt_usd(o.get_subtotal()), gemini.UNIT_USD],
+                    ["Fee", util.fmt_usd(o.get_fee()), gemini.UNIT_USD],
+                    ["Total", util.fmt_usd(o.get_total()), gemini.UNIT_USD],
                     ], tablefmt="plain", floatfmt=".8g", stralign="right"))
-    print_sep()
+    util.print_sep()
 
-    for warning in order.get_warnings():
+    for warning in o.get_warnings():
         print(warning)
 
     ok = input("Execute Order? (yes/no) ")
@@ -753,10 +394,10 @@ def confirm_order(order):
 def cancel_order(con):
     order_id = input("order_id: ")
     try:
-        order = get_order(con, order_id)
-        order.get_status().cancel()
-    except Exception as err:
-        print_err(err)
+        o = gemini.get_order(con, order_id)
+        o.get_status().cancel()
+    except Exception as ex:
+        util.print_err(ex)
         return
 
     print("Cancelled order_id: {0}".format(order_id))
@@ -768,95 +409,34 @@ def cancel_all(con):
     else:
         print("all orders cancelled")
 
-def get_fees(con):
-    # note first monnth of API usage shows 0% maker fees, but limit orders must reserve the
-    # normal fee amount so they can be executed after the first month with fees reserved
-    res = con.fees()
-    if res.status_code != 200:
-        raise Exception(result_to_dict(res))
-    else:
-        fee = res.json()
-
-        api_maker_fee = float(fee["api_maker_fee_bps"]/100)
-        api_taker_fee = float(fee["api_taker_fee_bps"]/100)
-
-        web_maker_fee = float(fee["web_maker_fee_bps"]/100)
-        web_taker_fee = float(fee["web_taker_fee_bps"]/100)
-
-        return api_maker_fee, api_taker_fee, web_maker_fee, web_taker_fee
-
 def show_fees(con):
-        api_maker_fee, api_taker_fee, web_maker_fee, web_taker_fee = get_fees(con)
+        api_maker_fee, api_taker_fee, web_maker_fee, web_taker_fee = gemini.get_fees(con)
         if api_maker_fee < 0:
             return
 
         web_taker_fee_delta = web_taker_fee - web_maker_fee
         web_fee_headers = ["Web Maker Fee", "Web Taker Fee", "Delta"]
         web_fees = [[
-                fmt_pct(web_maker_fee),
-                fmt_pct(web_taker_fee),
-                fmt_pct(web_taker_fee_delta),
+                util.fmt_pct(web_maker_fee),
+                util.fmt_pct(web_taker_fee),
+                util.fmt_pct(web_taker_fee_delta),
                 ]]
 
         api_taker_fee_delta = api_taker_fee - api_maker_fee
         api_fee_headers = ["API Maker Fee", "API Taker Fee", "Delta"]
         api_fees = [[
-                fmt_pct(api_maker_fee),
-                fmt_pct(api_taker_fee),
-                fmt_pct(api_taker_fee_delta),
+                util.fmt_pct(api_maker_fee),
+                util.fmt_pct(api_taker_fee),
+                util.fmt_pct(api_taker_fee_delta),
                 ]]
 
         print()
         print("FEES")
-        print_sep()
+        util.print_sep()
         print(tabulate(web_fees, headers=web_fee_headers, stralign="right"))
-        print_sep()
+        util.print_sep()
         print(tabulate(api_fees, headers=api_fee_headers, stralign="right"))
-        print_sep()
-
-def print_list(items, headers):
-    l = []
-    for o in items:
-        item = []
-        for h in headers:
-            item.append(o[h])
-        l.append(item)
-
-    #print(l)
-    #print()
-    print(tabulate(l, headers=headers, floatfmt=".8g"))
-    #print(tabulate(l, headers=headers))
-
-def print_sep():
-    print("-----------------------------------------------------------------------------")
-
-def print_header(title):
-    print()
-    print("**********************************")
-    print(title)
-    print("**********************************")
-
-def fmt_usd(val):
-    return locale.currency(val, grouping=True)
-
-def fmt_btc(val):
-    return "{:.8f}".format(val)
-
-def fmt_nbr(val):
-    return "{:,.2f}".format(val)
-
-def fmt_pct(val):
-    return "{:.2f}%".format(val)
-
-def fmt_date(dt):
-    return dt.strftime("%m/%d/%Y")
-
-def is_float(s):
-    try :
-        float(s)
-        return True
-    except :
-        return False
+        util.print_sep()
 
 def init():
     os.system('clear')
@@ -876,9 +456,9 @@ def init():
                 exit()
 
         print()
-        print_sep()
+        util.print_sep()
         print("GEMINI API LOGIN")
-        print_sep()
+        util.print_sep()
 
         site = input("Which Exchange? [live | sandbox] ")
         live = site == "live"

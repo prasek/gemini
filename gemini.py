@@ -1,329 +1,374 @@
-"""
-This module contains a class to make requests to the Gemini API.
+from api import Geminipy
+from decimal import Decimal
+from datetime import datetime
+import util
 
-Author: Mike Marzigliano
-"""
-import time
-import json
-import hmac
-import base64
-import hashlib
-import requests
+SIDE_BUY = "buy"
+SIDE_SELL = "sell"
+TYPE_LIMIT = "exchange limit"
+OPTION_MAKER_OR_CANCEL = "maker-or-cancel"
+SYMBOL_BTCUSD = "btcusd"
+UNIT_BTC = "BTC"
+UNIT_USD = "USD"
+RESERVE_FEE_ACTUAL = "actual"
+RESERVE_FEE_MAX = "max"
+RESERVE_FEE_NONE = "none"
+MAX_API_MAKER_FEE =  0.0010
+MAX_API_TAKER_FEE =  0.0035
+MAX_API_TAKER_FEE_DELTA =  MAX_API_TAKER_FEE - MAX_API_MAKER_FEE
+
+def new_order(con, side, price, quantity, unit):
+    return Order(con, side=side, price=price, quantity=quantity, quantity_unit=unit)
+
+def get_order(con, order_id):
+    status = get_order_status(con, order_id)
+    return Order(con, side=status.get_side(), price=status.get_price(), quantity=status.get_original_amount(), quantity_unit=UNIT_BTC, status=status)
+
+def get_order_status(con, order_id):
+    res = con.order_status(order_id)
+    if res.status_code != 200:
+        raise Exception(util.result_to_dict(res))
+
+    return OrderStatus(con, res.json())
+
+def get_quote(con):
+    res = con.pubticker(symbol="btcusd")
+    if res.status_code != 200:
+        raise Exception(util.result_to_dict(res))
+
+    tick = res.json()
+    ask = float(tick["ask"])
+    bid = float(tick["bid"])
+    last = float(tick["last"])
+    spread = ask - bid
+
+    return bid, ask, spread, last
+
+def get_fees(con):
+    # note first monnth of API usage shows 0% maker fees, but limit orders must reserve the
+    # normal fee amount so they can be executed after the first month with fees reserved
+    res = con.fees()
+    if res.status_code != 200:
+        raise Exception(util.result_to_dict(res))
+    else:
+        fee = res.json()
+
+        api_maker_fee = float(fee["api_maker_fee_bps"]/100)
+        api_taker_fee = float(fee["api_taker_fee_bps"]/100)
+
+        web_maker_fee = float(fee["web_maker_fee_bps"]/100)
+        web_taker_fee = float(fee["web_taker_fee_bps"]/100)
+
+        return api_maker_fee, api_taker_fee, web_maker_fee, web_taker_fee
+
+def get_balances(con):
+    bid, ask, spread, last = get_quote(con)
+    if bid < 0:
+        print("Error: bid unavailable")
+        return
+
+    res = con.balances()
+    if res.status_code != 200:
+        raise Exception(util.result_to_dict(res))
+    else:
+        headers = ["currency", "amount", "available"]
+        balances = res.json()
+
+        account_value = 0.0
+        available_to_trade_usd = 0.0
+        available_to_trade_btc = 0.0
+        l = []
+        for b in balances:
+            currency = b["currency"]
+            amount = float(b["amount"])
+            available = float(b["available"])
+            if currency == "USD":
+                account_value += amount
+                available_to_trade_usd = available
+            elif currency == "BTC":
+                account_value += amount * last
+                available_to_trade_btc = available
+            else:
+                continue
+
+            item = []
+            for h in headers:
+                item.append(b[h])
+            l.append(item)
+
+        return account_value, available_to_trade_usd, available_to_trade_btc
 
 
-class Geminipy(object):
-    """
-    A class to make requests to the Gemini API.
+class Order:
+    def __init__(self, con, side, price, quantity, quantity_unit=UNIT_USD, status=None):
+        self.con = con
+        self.side = side
+        self.price = float(price)
+        self.quantity = float(quantity)
+        self.quantity_unit = quantity_unit
+        self.status = status
 
-    Make public or authenticated requests according to the API documentation:
-    https://docs.gemini.com/
-    """
+        self.maker_or_cancel = True
+        self.reserve_api_fees = RESERVE_FEE_ACTUAL
 
-    live_url = 'https://api.gemini.com'
-    sandbox_url = 'https://api.sandbox.gemini.com'
-    base_url = sandbox_url
-    api_key = ''
-    secret_key = ''
+        self.reset_calculated()
 
-    def __init__(self, api_key='', secret_key='', live=False):
-        """
-        Initialize the class.
+    def reset_calculated(self):
+        self.btc_amount = -1.0
+        self.subtotal = 0.0
+        self.maker_fee = 0.0
+        self.taker_fee = 0.0
+        self.fee = 0.0
+        self.total = 0.0
+        self.warnings = []
 
-        Arguments:
-        api_key -- your Gemini API key
-        secret_key -- your Gemini API secret key for signatures
-        live -- use the live API? otherwise, use the sandbox (default False)
-        """
-        self.api_key = api_key
-        self.secret_key = secret_key
+        self.prepared = False
 
-        if live:
-            self.base_url = self.live_url
+    def assert_valid(self):
+        if not self.price > 0:
+            raise Exception("Invalid price: " + self.price)
 
-    # public requests
-    def symbols(self):
-        """Send a request for all trading symbols, return the response."""
-        url = self.base_url + '/v1/symbols'
+        if not self.quantity > 0:
+            raise Exception("Invalid quantity: " + self.quantity)
 
-        return requests.get(url)
+        if not (self.quantity_unit == UNIT_BTC or self.quantity_unit == UNIT_USD):
+            raise Exception("Invalid quantity unit" + self.quantity_unit)
 
-    def pubticker(self, symbol='btcusd'):
-        """Send a request for latest ticker info, return the response."""
-        url = self.base_url + '/v1/pubticker/' + symbol
+        if not (self.side == SIDE_BUY or self.side == SIDE_SELL):
+            raise Exception("Invalid side" + self.side)
 
-        return requests.get(url)
+    def assert_prepared(self):
+        ok = (
+                self.prepared
+                and self.btc_amount > 0
+                )
 
-    def book(self, symbol='btcusd', limit_bids=0, limit_asks=0):
-        """
-        Send a request to get the public order book, return the response.
+        if not ok:
+            raise Exception("Not prepared.")
 
-        Arguments:
-        symbol -- currency symbol (default 'btcusd')
-        limit_bids -- limit the number of bids returned (default 0)
-        limit_asks -- limit the number of asks returned (default 0)
-        """
-        url = self.base_url + '/v1/book/' + symbol
-        params = {
-            'limit_bids': limit_bids,
-            'limit_asks': limit_asks
-        }
+    def get_side(self):
+        return self.side
 
-        return requests.get(url, params)
+    def set_side(self, side):
+        allowed = [SIDE_BUY, SIDE_SELL]
+        if not side in allowed:
+            raise Exception("Side {0} not in {1}".format(side, allowed))
 
-    def trades(self, symbol='btcusd', since=0, limit_trades=50,
-               include_breaks=0):
-        """
-        Send a request to get all public trades, return the response.
+        self.side = side
+        self.reset_calculated()
 
-        Arguments:
-        symbol -- currency symbol (default 'btcusd')
-        since -- only return trades after this unix timestamp (default 0)
-        limit_trades -- maximum number of trades to return (default 50).
-        include_breaks -- whether to display broken trades (default False)
-        """
-        url = self.base_url + '/v1/trades/' + symbol
-        params = {
-            'since': since,
-            'limit_trades': limit_trades,
-            'include_breaks': include_breaks
-        }
+    def get_price(self):
+        return self.price
 
-        return requests.get(url, params)
+    def set_price(self, price):
+        self.price = float(price)
+        self.reset_calculated()
 
-    def auction(self, symbol='btcusd'):
-        """Send a request for latest auction info, return the response."""
-        url = self.base_url + '/v1/auction/' + symbol
+    def get_quantity(self):
+        return self.quantity
 
-        return requests.get(url)
+    def set_quantity(self, quantity):
+        self.quantity = float(quantity)
+        self.reset_calculated()
 
-    def auction_history(self, symbol='btcusd', since=0,
-                        limit_auction_results=50, include_indicative=1):
-        """
-        Send a request for auction history info, return the response.
+    def get_quantity_unit(self):
+        return self.quantity_unit
 
-        Arguments:
-        symbol -- currency symbol (default 'btcusd')
-        since -- only return auction events after this timestamp (default 0)
-        limit_auction_results -- maximum number of auction events to return
-                                 (default 50).
-        include_indicative -- whether to include publication of indicative
-                              prices and quantities. (default True)
-        """
-        url = self.base_url + '/v1/auction/' + symbol + '/history'
-        params = {
-            'since': since,
-            'limit_auction_results': limit_auction_results,
-            'include_indicative': include_indicative
-        }
+    def set_quantity_unit(self, unit):
+        allowed = [UNIT_BTC, UNIT_USD]
+        if not unit in allowed:
+            raise Exception("Quantity unit {0} not in {1}".format(unit, allowed))
 
-        return requests.get(url, params)
+        self.quantity_unit = unit
+        self.reset_calculated()
 
-    # authenticated requests
-    def new_order(self, amount, price, side, client_order_id=None,
-                  symbol='btcusd', type='exchange limit', options=None):
-        """
-        Send a request to place an order, return the response.
+    def get_maker_or_cancel(self):
+        return self.maker_or_cancel
 
-        Arguments:
-        amount -- quoted decimal amount of BTC to purchase
-        price -- quoted decimal amount of USD to spend per BTC
-        side -- 'buy' or 'sell'
-        client_order_id -- an optional client-specified order id (default None)
-        symbol -- currency symbol (default 'btcusd')
-        type -- the order type (default 'exchange limit')
-        """
-        request = '/v1/order/new'
-        url = self.base_url + request
-        params = {
-            'request': request,
-            'nonce': self.get_nonce(),
-            'symbol': symbol,
-            'amount': amount,
-            'price': price,
-            'side': side,
-            'type': type
-        }
+    def set_maker_or_cancel(self, required):
+        self.maker_or_cancel = bool(required)
+        self.reset_calculated()
 
-        if client_order_id is not None:
-            params['client_order_id'] = client_order_id
+    def get_reserve_api_fees(self):
+        return self.reserve_api_fees
 
-        if options is not None:
-            params['options'] = options
+    def set_reserve_api_fees(self, reserve):
+        allowed = [RESERVE_FEE_NONE, RESERVE_FEE_ACTUAL, RESERVE_FEE_MAX]
+        if not reserve in allowed:
+            raise Exception("Reserve type {0} not in {1}".format(reserve, allowed))
 
-        return requests.post(url, headers=self.prepare(params))
+        self.reserve_api_fees = reserve
+        self.reset_calculated()
 
-    def cancel_order(self, order_id):
-        """
-        Send a request to cancel an order, return the response.
+    def get_btc_amount(self):
+        return self.btc_amount
 
-        Arguments:
-        order_id - the order id to cancel
-        """
-        request = '/v1/order/cancel'
-        url = self.base_url + request
-        params = {
-            'request': request,
-            'nonce': self.get_nonce(),
-            'order_id': order_id
-        }
+    def get_subtotal(self):
+        return self.subtotal
 
-        return requests.post(url, headers=self.prepare(params))
+    def get_maker_fee(self):
+        return self.maker_fee
 
-    def cancel_session(self):
-        """Send a request to cancel all session orders, return the response."""
-        request = '/v1/order/cancel/session'
-        url = self.base_url + request
-        params = {
-            'request': request,
-            'nonce': self.get_nonce()
-        }
+    def get_taker_fee(self):
+        return self.taker_fee
 
-        return requests.post(url, headers=self.prepare(params))
+    def get_fee(self):
+        return self.fee
 
-    def cancel_all(self):
-        """Send a request to cancel all orders, return the response."""
-        request = '/v1/order/cancel/all'
-        url = self.base_url + request
-        params = {
-            'request': request,
-            'nonce': self.get_nonce()
-        }
+    def get_total(self):
+        return self.total
 
-        return requests.post(url, headers=self.prepare(params))
+    def prepare(self):
+        self.assert_valid()
 
-    def order_status(self, order_id):
-        """
-        Send a request to get an order status, return the response.
+        # fees to use/reserve
+        api_maker_fee = 0.0
+        api_taker_fee = 0.0
 
-        Arguments:
-        order_id -- the order id to get information on
-        """
-        request = '/v1/order/status'
-        url = self.base_url + request
-        params = {
-            'request': request,
-            'nonce': self.get_nonce(),
-            'order_id': order_id
-        }
+        if self.reserve_api_fees == RESERVE_FEE_ACTUAL:
+            api_maker_fee, api_taker_fee, web_maker_fee, web_taker_fee = get_fees(self.con)
+            api_maker_fee = api_maker_fee / 100
+            api_taker_fee = api_taker_fee / 100
+        elif self.reserve_api_fees == RESERVE_FEE_MAX:
+            api_maker_fee = MAX_API_MAKER_FEE
+            api_taker_fee = MAX_API_TAKER_FEE
 
-        return requests.post(url, headers=self.prepare(params))
+        # max fee in use
+        fee_pct = api_taker_fee
+        if self.maker_or_cancel:
+            fee_pct = api_maker_fee
 
-    def active_orders(self):
-        """Send a request to get active orders, return the response."""
-        request = '/v1/orders'
-        url = self.base_url + request
-        params = {
-            'request': request,
-            'nonce': self.get_nonce()
-        }
+        # btc_amount
+        if self.quantity_unit == UNIT_BTC:
+            self.btc_amount = self.quantity
 
-        return requests.post(url, headers=self.prepare(params))
+        elif self.quantity_unit == UNIT_USD:
+            if self.side == SIDE_BUY:
+                self.subtotal = self.quantity / (1 + fee_pct)
+                self.btc_amount= self.subtotal / self.price
 
-    def past_trades(self, symbol='btcusd', limit_trades=50, timestamp=0):
-        """
-        Send a trade history request, return the response.
+            elif self.side == SIDE_SELL:
+                self.subtotal = self.quantity / (1 - fee_pct)
+                self.btc_amount = self.quantity / self.price
 
-        Arguements:
-        symbol -- currency symbol (default 'btcusd')
-        limit_trades -- maximum number of trades to return (default 50)
-        timestamp -- only return trades after this unix timestamp (default 0)
-        """
-        request = '/v1/mytrades'
-        url = self.base_url + request
-        params = {
-            'request': request,
-            'nonce': self.get_nonce(),
-            'symbol': symbol,
-            'limit_trades': limit_trades,
-            'timestamp': timestamp
-        }
+            else:
+                raise Exception("Invalid side: " + self.side)
 
-        return requests.post(url, headers=self.prepare(params))
+        else:
+            raise Exception("Invalid quantity unit: " + self.quantity_unit)
 
-    def tradevolume(self):
-        """Send a request to get your trade volume, return the response."""
-        request = '/v1/tradevolume'
-        url = self.base_url + request
-        params = {
-            'request': request,
-            'nonce': self.get_nonce()
-        }
+        self.subtotal = self.btc_amount * self.price
+        self.fee = self.subtotal * fee_pct
+        self.total = self.subtotal + self.fee
 
-        return requests.post(url, headers=self.prepare(params))
+        bid, ask, spread, last = get_quote(self.con)
 
-    def balances(self):
-        """Send an account balance request, return the response."""
-        request = '/v1/balances'
-        url = self.base_url + request
-        params = {
-            'request': request,
-            'nonce': self.get_nonce()
-        }
+        self.warnings = []
+        if spread > 0.05:
+            self.warnings.append("warning: spread: {0}".format(util.fmt_usd(spread)))
+        if self.side == SIDE_BUY:
+            if self.price > ask:
+                self.warnings.append("warning: buy price ({0}) is higher than ask ({1}) - TAKER".format(util.fmt_usd(self.price), util.fmt_usd(ask)))
+        if self.side == SIDE_SELL:
+            if self.price < bid:
+                self.warnings.append("warning: sell price ({0}) is lower than bid ({1}) - TAKER".format(util.fmt_usd(self.price), util.fmt_usd(bid)))
 
-        return requests.post(url, headers=self.prepare(params))
+        self.prepared = True
 
-    def newAddress(self, currency='btc', label=''):
-        """
-        Send a request for a new cryptocurrency deposit address
-        with an optional label. Return the response.
+    def get_warnings(self):
+        return self.warnings
 
-        Arguements:
-        currency -- a Gemini supported cryptocurrency (btc, eth)
-        label -- optional label for the deposit address
-        """
-        request = '/v1/deposit/' + currency + '/newAddress'
-        url = self.base_url + request
-        params = {
-            'request': request,
-            'nonce': self.get_nonce()
-        }
+    def execute(self):
+        self.assert_valid()
+        self.assert_prepared()
 
-        if label != '':
-            params['label'] = label
+        options = []
+        if self.maker_or_cancel:
+            options.append(OPTION_MAKER_OR_CANCEL)
 
-        return requests.post(url, headers=self.prepare(params))
+        res = self.con.new_order(amount=util.fmt_btc(self.btc_amount), price=self.price, side=self.side, options=options)
 
-    def fees(self):
-        """Send a request to get fee and notional volume, return the response."""
-        request = '/v1/notionalvolume'
-        url = self.base_url + request
-        params = {
-            'request': request,
-            'nonce': self.get_nonce()
-        }
+        if res.status_code != 200:
+            raise Exception(util.result_to_dict(res))
 
-        return requests.post(url, headers=self.prepare(params))
+        self.status = OrderStatus(self.con, res.json())
 
-    def heartbeat(self):
-        """Send a heartbeat message, return the response."""
-        request = '/v1/heartbeat'
-        url = self.base_url + request
-        params = {
-            'request': request,
-            'nonce': self.get_nonce()
-        }
+    def cancel_and_replace(self):
+        if self.status == None:
+            raise Exception("No order to replace.")
 
-        return requests.post(url, headers=self.prepare(params))
+        self.status.cancel()
+        self.status.refresh()
 
-    def get_nonce(self):
-        """Return the current millisecond timestamp as the nonce."""
-        return int(round(time.time() * 1000))
+        self.quantity = self.status.get_remaining_amount()
+        self.quantity_unit = UNIT_BTC
 
-    def prepare(self, params):
-        """
-        Prepare, return the required HTTP headers.
+        self.prepare()
 
-        Base 64 encode the parameters, sign it with the secret key,
-        create the HTTP headers, return the whole payload.
+        return self.execute()
 
-        Arguments:
-        params -- a dictionary of parameters
-        """
-        jsonparams = json.dumps(params)
-        payload = base64.b64encode(jsonparams.encode())
-        signature = hmac.new(self.secret_key.encode(), payload,
-                             hashlib.sha384).hexdigest()
+    def get_status(self):
+        return self.status
 
-        return {'X-GEMINI-APIKEY': self.api_key,
-                'X-GEMINI-PAYLOAD': payload,
-                'X-GEMINI-SIGNATURE': signature}
+class OrderStatus:
+    def __init__(self, con, data):
+        self.con = con
+        self.data = data
+
+    def get_order_id(self):
+        return int(self.data["order_id"])
+
+    def get_timestamp(self):
+        return datetime.fromtimestamp(self.data["timestamp"])
+
+    def get_side(self):
+        return self.data["side"]
+
+    def get_type(self):
+        return self.data["type"]
+
+    def get_price(self):
+        return float(self.data["price"])
+
+    def get_symbol(self):
+        return float(self.data["symbol"])
+
+    def get_original_amount(self):
+        return float(self.data["original_amount"])
+
+    def get_executed_amount(self):
+        return float(self.data["executed_amount"])
+
+    def get_remaining_amount(self):
+        return float(self.data["remaining_amount"])
+
+    def get_avg_execution_price(self):
+        return float(self.data["avg_execution_price"])
+
+    def is_live(self):
+        return bool(self.data["is_live"])
+
+    def is_cancelled(self):
+        return bool(self.data["is_cancelled"])
+
+    def get_total(self):
+        return self.price() * self.original_amount()
+
+    def refresh(self):
+        res = self.con.order_status(self.get_order_id())
+        if res.status_code != 200:
+            raise Exception(util.result_to_dict(res))
+
+        self.data = res.json()
+
+    def cancel(self):
+        if self.is_cancelled():
+            raise Exception("Order already cancelled.")
+
+        res = self.con.cancel_order(self.get_order_id())
+        if res.status_code != 200:
+            raise Exception(util.result_to_dict(res))
+
+    def to_dict(self):
+        return self.data
+
