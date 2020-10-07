@@ -7,21 +7,26 @@ import yaml
 import csv
 import getpass
 import locale
+import traceback
 
 SIDE_BUY = "buy"
 SIDE_SELL = "sell"
 TYPE_LIMIT = "exchange limit"
 OPTION_MAKER_OR_CANCEL = "maker-or-cancel"
 SYMBOL_BTCUSD = "btcusd"
-FORMAT_TABLE = "table"
-FORMAT_CSV= "csv"
 UNIT_BTC = "BTC"
 UNIT_USD = "USD"
+RESERVE_FEE_ACTUAL = "actual"
+RESERVE_FEE_MAX = "max"
+RESERVE_FEE_NONE = "none"
 MAX_API_MAKER_FEE =  0.0010
 MAX_API_TAKER_FEE =  0.0035
 MAX_API_TAKER_FEE_DELTA =  MAX_API_TAKER_FEE - MAX_API_MAKER_FEE
-locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
+FORMAT_TABLE = "table"
+FORMAT_CSV= "csv"
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+ 
 cmds = [
     ['bal', 'balances and available amounts', lambda con: show_balances(con)],
     ['stat', 'avg. cost basis, gain/loss, perf', lambda con: show_history(con, history=False, stats=True)],
@@ -32,7 +37,7 @@ cmds = [
     ['sell', 'sell in net USD quantity including fees', lambda con: sell(con)],
     ['sell btc', 'sell in BTC quantity', lambda con: sell_btc(con)],
     ['status', 'order status', lambda con: show_order_status(con)],
-    ['cancel', 'cancel an order', lambda con: cancel(con)],
+    ['cancel', 'cancel an order', lambda con: cancel_order(con)],
     ['cancel all', 'cancel all orders', lambda con: cancel_all(con)],
     ['cancel replace', 'cancel and replace order', lambda con: cancel_and_replace(con)],
     ['history', 'list past trades', lambda con: show_history(con, history=True, stats=True)],
@@ -41,8 +46,8 @@ cmds = [
     ['exit', 'exit the console app', lambda con: done()],
 ]
 
-def new_order(con, side, price, quantity, quantity_unit):
-    return Order(con, side=side, price=price, quantity=quantity, quantity_unit=UNIT_BTC)
+def new_order(con, side, price, quantity, unit):
+    return Order(con, side=side, price=price, quantity=quantity, quantity_unit=unit)
 
 def get_order(con, order_id):
     status = get_order_status(con, order_id)
@@ -59,12 +64,13 @@ class Order:
     def __init__(self, con, side, price, quantity, quantity_unit=UNIT_USD, status=None):
         self.con = con
         self.side = side
-        self.price = price
-        self.quantity = quantity
+        self.price = float(price)
+        self.quantity = float(quantity)
         self.quantity_unit = quantity_unit
         self.status = status
 
         self.maker_or_cancel = True
+        self.reserve_api_fees = RESERVE_FEE_ACTUAL
 
         self.reset_calculated()
 
@@ -75,6 +81,7 @@ class Order:
         self.taker_fee = 0.0
         self.fee = 0.0
         self.total = 0.0
+        self.warnings = []
 
         self.prepared = False
 
@@ -104,8 +111,9 @@ class Order:
         return self.side
 
     def set_side(self, side):
-        if not (side == SIDE_BUY or side == SIDE_SELL):
-            raise Exception("Invalid side: " + side)
+        allowed = [SIDE_BUY, SIDE_SELL]
+        if not side in allowed:
+            raise Exception("Side {0} not in {1}".format(side, allowed))
 
         self.side = side
         self.reset_calculated()
@@ -128,8 +136,9 @@ class Order:
         return self.quantity_unit
 
     def set_quantity_unit(self, unit):
-        if not (unit == UNIT_BTC or unit == UNIT_USD):
-            raise Exception("Invalid quantity unit: " + unit)
+        allowed = [UNIT_BTC, UNIT_USD]
+        if not unit in allowed:
+            raise Exception("Quantity unit {0} not in {1}".format(unit, allowed))
 
         self.quantity_unit = unit
         self.reset_calculated()
@@ -139,6 +148,17 @@ class Order:
 
     def set_maker_or_cancel(self, required):
         self.maker_or_cancel = bool(required)
+        self.reset_calculated()
+
+    def get_reserve_api_fees(self):
+        return self.reserve_api_fees
+
+    def set_reserve_api_fees(self, reserve):
+        allowed = [RESERVE_FEE_NONE, RESERVE_FEE_ACTUAL, RESERVE_FEE_MAX]
+        if not reserve in allowed:
+            raise Exception("Reserve type {0} not in {1}".format(reserve, allowed))
+
+        self.reserve_api_fees = reserve
         self.reset_calculated()
 
     def get_btc_amount(self):
@@ -162,29 +182,62 @@ class Order:
     def prepare(self):
         self.assert_valid()
 
+        # fees to use/reserve
+        api_maker_fee = 0.0
+        api_taker_fee = 0.0
+
+        if self.reserve_api_fees == RESERVE_FEE_ACTUAL:
+            api_maker_fee, api_taker_fee, web_maker_fee, web_taker_fee = get_fees(self.con)
+            api_maker_fee = api_maker_fee / 100
+            api_taker_fee = api_taker_fee / 100
+        elif self.reserve_api_fees == RESERVE_FEE_MAX:
+            api_maker_fee = MAX_API_MAKER_FEE
+            api_taker_fee = MAX_API_TAKER_FEE
+
+        # max fee in use
+        fee_pct = api_taker_fee
+        if self.maker_or_cancel:
+            fee_pct = api_maker_fee
+
+        # btc_amount
         if self.quantity_unit == UNIT_BTC:
             self.btc_amount = self.quantity
+
         elif self.quantity_unit == UNIT_USD:
-            self.btc_amount = self.quantity / self.price
+            if self.side == SIDE_BUY:
+                self.subtotal = self.quantity / (1 + fee_pct)
+                self.btc_amount= self.subtotal / self.price
+
+            elif self.side == SIDE_SELL:
+                self.subtotal = self.quantity / (1 - fee_pct)
+                self.btc_amount = self.quantity / self.price
+
+            else:
+                raise Exception("Invalid side: " + self.side)
+
         else:
             raise Exception("Invalid quantity unit: " + self.quantity_unit)
 
         self.subtotal = self.btc_amount * self.price
-
-        api_maker_fee, api_taker_fee, web_maker_fee, web_taker_fee = get_fees(self.con)
-        if api_maker_fee < 0:
-            raise Exception("invalid api_fees" + api_maker_fee)
-
-        self.maker_fee = self.subtotal * api_maker_fee
-        self.taker_fee = self.subtotal * api_taker_fee
-
-        if self.maker_or_cancel:
-            self.fee = self.maker_fee
-        else:
-            self.fee = self.taker_fee
-
+        self.fee = self.subtotal * fee_pct
         self.total = self.subtotal + self.fee
+
+        bid, ask, spread, last = get_quote(self.con)
+
+        self.warnings = []
+        if spread > 0.05:
+            self.warnings.append("warning: spread: {0}".format(fmt_usd(spread)))
+        if self.side == SIDE_BUY:
+            if self.price > ask:
+                self.warnings.append("warning: buy price ({0}) is higher than ask ({1}) - TAKER".format(fmt_usd(self.price), fmt_usd(ask)))
+        if self.side == SIDE_SELL:
+            if self.price < bid:
+                self.warnings.append("warning: sell price ({0}) is lower than bid ({1}) - TAKER".format(fmt_usd(self.price), fmt_usd(bid)))
+
         self.prepared = True
+
+    def get_warnings(self):
+        return self.warnings
 
     def execute(self):
         self.assert_valid()
@@ -194,7 +247,7 @@ class Order:
         if self.maker_or_cancel:
             options.append(OPTION_MAKER_OR_CANCEL)
 
-        res = self.con.new_order(amount=self.btc_amount, price=self.price, side=self.side, options=options)
+        res = self.con.new_order(amount=fmt_btc(self.btc_amount), price=self.price, side=self.side, options=options)
 
         if res.status_code != 200:
             raise Exception(result_to_dict(res))
@@ -214,6 +267,9 @@ class Order:
         self.prepare()
 
         return self.execute()
+
+    def get_status(self):
+        return self.status
 
 class OrderStatus:
     def __init__(self, con, data):
@@ -280,24 +336,32 @@ class OrderStatus:
 def result_to_dict(res):
     return {"code": res.status_code, "json": res.json()}
 
-def print_err(err):
-    print("ERROR: {0}".format(err))
+def print_err(ex):
+    print("ERROR: {0}".format(ex))
+
+    #print_sep()
+    #traceback.print_exception(type(ex), ex, ex.__traceback__)
+    #print_sep()
 
 def show_balances(con):
-    account_value, available_to_trade_usd, available_to_trade_btc = get_balances(con)
+    try:
+        account_value, available_to_trade_usd, available_to_trade_btc = get_balances(con)
 
-    headers = ["Notational Account Value", "Available to Trade (USD)", "Available to Trade (BTC)"]
-    data = [[
-            fmt_usd(account_value),
-            fmt_usd(available_to_trade_usd),
-            fmt_btc(available_to_trade_btc),
-            ]]
+        headers = ["Notational Account Value", "Available to Trade (USD)", "Available to Trade (BTC)"]
+        data = [[
+                fmt_usd(account_value),
+                fmt_usd(available_to_trade_usd),
+                fmt_btc(available_to_trade_btc),
+                ]]
 
-    print()
-    print("BALANCES")
-    print_sep()
-    print(tabulate(data, headers=headers, floatfmt=".8g", stralign="right"))
-    print_sep()
+        print()
+        print("BALANCES")
+        print_sep()
+        print(tabulate(data, headers=headers, floatfmt=".8g", stralign="right"))
+        print_sep()
+
+    except Exception as err:
+        print_err(err)
 
 def get_balances(con):
     bid, ask, spread, last = get_quote(con)
@@ -307,9 +371,7 @@ def get_balances(con):
 
     res = con.balances()
     if res.status_code != 200:
-        print("ERROR STATUS: {0}".format(res.status_code))
-        print(res.json())
-        return -1, -1, -1
+        raise Exception(result_to_dict(res))
     else:
         headers = ["currency", "amount", "available"]
         balances = res.json()
@@ -371,26 +433,30 @@ def cancel_and_replace(con):
             print("Order is not live.")
             return
 
-        price = input("new price: ")
+        price = get_price(con, order.get_side(), order.get_quantity_unit())
         order.set_price(price)
         order.set_quantity(order.status.get_remaining_amount())
         order.prepare()
-        print_sep()
-        print("Side: " + order.get_side())
-        print("Price: " + fmt_usd(order.get_price()))
-        print("Quantity: " + fmt_btc(order.get_quantity()))
-        print("Subtotal: " + fmt_usd(order.get_subtotal()))
-        print("Fee: " + fmt_usd(order.get_fee()))
-        print("Total: " + fmt_usd(order.get_total()))
-        print_sep()
 
-        print()
-        ok = input("Execute Order? (yes/no) ")
-        if ok != "yes" and ok != "y":
-            print("skipping order")
+        if not confirm_order(order):
             return
 
         order.cancel_and_replace()
+
+        if order.get_status().is_cancelled():
+            order.set_maker_or_cancel(False)
+            order.prepare()
+
+            print()
+            ok = input("Accept TAKER fee of {0}?? (yes/no) ".format(fmt_usd(order.get_fee())))
+            if ok != "yes" and ok != "y":
+                print("skipping order")
+                return False
+        
+            if not confirm_order(order):
+                return
+
+            order.execute()
 
         print()
         print("ORDER REPLACED")
@@ -421,12 +487,12 @@ def print_orders(orders):
         print_sep()
 
 def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
-    symbol = "btcusd"
-    res = con.past_trades(symbol=symbol, limit_trades=1000)
-    if res.status_code != 200:
-        print("ERROR STATUS: {0}".format(res.status_code))
-        print(res.json())
-    else:
+    try:
+        symbol = "btcusd"
+        res = con.past_trades(symbol=symbol, limit_trades=1000)
+        if res.status_code != 200:
+            raise Exception(result_to_dict(res))
+
         orders = res.json()
         headers = ["date", "type", "total", "price", "amount", "symbol", "fee_amount", "order_id"]
         l = []
@@ -501,12 +567,13 @@ def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
             print(tabulate(stats, headers=headers, stralign="right"))
             print_sep()
 
+    except Exception as err:
+        print_err(err)
+
 def get_quote(con):
     res = con.pubticker(symbol="btcusd")
     if res.status_code != 200:
-        print("ERROR STATUS: {0}".format(res.status_code))
-        print(res.json())
-        return -1, -1, -1, -1
+        raise Exception(result_to_dict(res))
 
     tick = res.json()
     ask = float(tick["ask"])
@@ -533,205 +600,161 @@ def show_quote(con):
 
 
 def buy(con):
-    side = 'buy'
-    quantity_unit = "USD"
 
-    price, amount_usd = get_price_quantity(con, side, quantity_unit)
-    if price is None or amount_usd is None:
-        return
+    try:
+        side = SIDE_BUY
+        unit = UNIT_USD
+        price, quantity = get_price_quantity(con, side, unit)
+        order = new_order(con, side, price, quantity, unit)
 
-    subtotal = float(amount_usd) / (1 + MAX_API_MAKER_FEE)
-    fee = subtotal * MAX_API_MAKER_FEE
-    total = subtotal + fee
+        execute_order(con, order)
 
-    amount_btc = fmt_btc(subtotal / float(price))
+    except Exception as err:
+        print_err(err)
 
-    execute_order(con,
-            side,
-            price=price,
-            quantity=amount_btc,
-            subtotal=subtotal,
-            fee=fee,
-            total=total)
 
 def buy_btc(con):
-    side = 'buy'
-    quantity_unit = "BTC"
+    try:
+        side = SIDE_BUY
+        unit = UNIT_BTC
+        price, quantity = get_price_quantity(con, side, unit)
+        order = new_order(con, side, price, quantity, unit)
 
-    price, amount_btc = get_price_quantity(con, side, quantity_unit)
-    if price is None or amount_btc is None:
-        return
+        execute_order(con, order)
 
-    subtotal = float(amount_btc) * float(price)
-    fee = subtotal * MAX_API_MAKER_FEE
-    total = subtotal + fee
-
-    execute_order(con,
-            side,
-            price=price,
-            quantity=amount_btc,
-            subtotal=subtotal,
-            fee=fee,
-            total=total)
+    except Exception as err:
+        print_err(err)
 
 def sell(con):
-    side = 'sell'
-    quantity_unit = "USD"
+    try:
+        side = SIDE_SELL
+        unit = UNIT_USD
+        price, quantity = get_price_quantity(con, side, unit)
+        order = new_order(con, side, price, quantity, unit)
 
-    price, amount_usd = get_price_quantity(con, side, quantity_unit)
-    if price is None or amount_usd is None:
-        return
+        execute_order(con, order)
 
-    subtotal = float(amount_usd) / (1 - MAX_API_MAKER_FEE)
-    fee = subtotal * MAX_API_MAKER_FEE
-    total = subtotal - fee
-
-    amount_btc = fmt_btc((float(subtotal) / float(price)))
-
-    execute_order(con,
-            side,
-            price=price,
-            quantity=amount_btc,
-            subtotal=subtotal,
-            fee=fee,
-            total=total)
+    except Exception as err:
+        print_err(err)
 
 def sell_btc(con):
-    side = 'sell'
-    quantity_unit = "BTC"
+    try:
+        side = SIDE_SELL
+        unit = UNIT_BTC
+        price, quantity = get_price_quantity(con, side, unit)
+        order = new_order(con, side, price, quantity, unit)
 
-    price, amount_btc = get_price_quantity(con, side, quantity_unit)
-    if price is None or amount_btc is None:
+        execute_order(con, order)
+
+    except Exception as err:
+        print_err(err)
+
+def get_price_quantity(con, side, unit):
+    print("{0} {1}".format(side.upper(), unit))
+    price = get_price(con, side, unit)
+    quantity = get_quantity(con, side, unit)
+    return price, quantity
+
+def get_price(con, side, unit):
+    price = input("Price (USD): ")
+
+    if price == "market":
+        bid, ask, spread, last = get_quote(con)
+        max_over_under = input("Max over/under bid/ask (default: 0): ")
+        if len(max_over_under) == 0:
+            max_over_under = 0
+        else:
+            if not is_float(max_over_under):
+                raise Exception("Error: not a valid USD value.")
+            max_over_under = float(max_over_under)
+
+        if side == SIDE_BUY:
+            price = str(ask + max_over_under)
+        if side == SIDE_SELL:
+            price = str(bid - max_over_under)
+
+    if not is_float(price):
+        raise Exception("Invalid price.")
+
+    return price
+
+def get_quantity(con, side, unit):
+    quantity = input("Quantity ({0}): ".format(unit))
+
+    if quantity == "max":
+        account_value, available_to_trade_usd, available_to_trade_btc = get_balances(con)
+        if side == SIDE_BUY and unit == UNIT_USD:
+            quantity = str(available_to_trade_usd)
+        if side == SIDE_SELL and unit == UNIT_BTC:
+            quantity = str(available_to_trade_btc)
+
+    if not is_float(quantity):
+        raise Exception("Invalid quantity.")
+
+    return quantity
+
+def execute_order(con, order):
+
+    order.prepare()
+
+    if not confirm_order(order):
         return
 
-    subtotal = float(amount_btc) * float(price)
-    fee = subtotal * MAX_API_MAKER_FEE
-    total = subtotal - fee
+    order.execute()
 
-    execute_order(con,
-            side,
-            price=price,
-            quantity=amount_btc,
-            subtotal=subtotal,
-            fee=fee,
-            total=total)
+    if order.get_status().is_cancelled() and order.get_maker_or_cancel():
+        print()
+        print("AUTO CANCELLED - MAKER FEE NOT AVAILABLE!")
+        print()
 
-def get_price_quantity(con, side, quantity_unit):
-        print(side.upper())
-        quantity = input("Quantity ({0}): ".format(quantity_unit))
-        price = input("Price (USD): ")
+        order.set_maker_or_cancel(False)
+        order.prepare()
 
-        if price == "market":
-            bid, ask, spread, last = get_quote(con)
-            max_over_under = input("Max over/under bid/ask (default: 0): ")
-            if len(max_over_under) == 0:
-                max_over_under = 0
-            else:
-                if not is_float(max_over_under):
-                    print("Error: not a valid USD value.")
-                    return None, None
-                max_over_under = float(max_over_under)
-            if max_over_under < 0:
-                print("Error: must be > 0.")
-                return None, None
+        print()
+        ok = input("Accept TAKER fee of {0}?? (yes/no) ".format(fmt_usd(order.get_fee())))
+        if ok != "yes" and ok != "y":
+            print("skipping order")
+            return False
+    
+        if not confirm_order(order):
+            return
 
-            if side == "buy":
-                price = str(ask + max_over_under)
-            if side == "sell":
-                price = str(bid - max_over_under)
+        order.execute()
 
-        if quantity == "max":
-            account_value, available_to_trade_usd, available_to_trade_btc = get_balances(con)
-            if side == "buy" and quantity_unit == "USD":
-                quantity = str(available_to_trade_usd)
-            if side == "sell" and quantity_unit == "BTC":
-                quantity = str(available_to_trade_btc)
+    print()
+    print("OK!")
+    print_orders([order.get_status().to_dict()])
 
-        if not is_float(price) or not is_float(quantity):
-            print("invalid price or quantity")
-            return None, None
-
-        return price, quantity
-
-def execute_order(con, side, price, quantity, subtotal, fee, total):
-
-    bid, ask, spread, last = show_quote(con)
-
-    print_header("CONFIRM {0}:".format(side.upper()))
-
+def confirm_order(order):
+    print_header("CONFIRM {0}:".format(order.get_side().upper()))
     print(tabulate([["PRICE", "", ""],
-                    ["", fmt_nbr(float(price)), "USD"],
+                    ["", fmt_nbr(order.get_price()), UNIT_USD],
                     ["", "", ""],
                     ["QUANTITY", "", ""],
-                    ["", fmt_btc(float(quantity)), "BTC"],
-                    ["", fmt_nbr(subtotal), "USD"],
+                    ["", fmt_btc(order.get_btc_amount()), UNIT_BTC],
+                    ["", fmt_nbr(order.get_subtotal()), UNIT_USD],
                     ["", "", ""],
-                    ["Subtotal", fmt_usd(subtotal), "USD"],
-                    ["Fee", fmt_usd(fee), "USD"],
-                    ["Total", fmt_usd(total), "USD"],
+                    ["Subtotal", fmt_usd(order.get_subtotal()), UNIT_USD],
+                    ["Fee", fmt_usd(order.get_fee()), UNIT_USD],
+                    ["Total", fmt_usd(order.get_total()), UNIT_USD],
                     ], tablefmt="plain", floatfmt=".8g", stralign="right"))
     print_sep()
 
-    prc = float(price)
-    if spread > 0.05:
-        print("WARNING: Spread: {0}".format(fmt_usd(spread)))
-    if side == "buy":
-        if prc > ask:
-            print("WARNING: Buy price ({0}) is higher than ask ({1}) - TAKER".format(fmt_usd(prc), fmt_usd(ask)))
-        if prc < (bid * .9):
-            print("WARNING: Buy price ({0}) is > 10% under current bid ({1})".format(fmt_usd(prc), fmt_usd(ask)))
-    if side == "sell":
-        if prc < bid:
-            print("WARNING: Sell price ({0}) is lower than bid ({1}) - TAKER".format(fmt_usd(prc), fmt_usd(bid)))
-        if prc > (ask * 1.1):
-            print("WARNING: Sell price ({0}) is > 10% over the current ask ({1})".format(fmt_usd(prc), fmt_usd(bid)))
+    for warning in order.get_warnings():
+        print(warning)
 
     ok = input("Execute Order? (yes/no) ")
     if ok != "yes" and ok != "y":
         print("skipping order")
         return False
 
-    res = con.new_order(amount=quantity, price=price, side=side, options=["maker-or-cancel"])
-    order = res.json()
-
-    if res.status_code != 200:
-        print()
-        print("Error status: {0}".format(res.status_code))
-        print(res.json())
-        print("Error status: {0}".format(res.status_code))
-        return False
-
-    elif order["is_cancelled"]:
-        print()
-        print("AUTO CANCELLED - MAKER FEE NOT AVAILABLE!")
-        print()
-
-        extra_fee = subtotal * MAX_API_TAKER_FEE_DELTA
-
-        ok = input("Resubmit order with additional TAKER fee of {0}?? (yes/no) ".format(fmt_usd(extra_fee)))
-        if ok != "yes" and ok != "y":
-            print("skipping order")
-            return False
-
-        res = con.new_order(amount=quantity, price=price, side=side)
-        order = res.json()
-
-        if res.status_code != 200:
-            print()
-            print("Error status: {0}".format(res.status_code))
-            print(res.json())
-            print("Error status: {0}".format(res.status_code))
-            return False
-
-    print()
-    print("OK!")
-    print_orders([res.json()])
+    return True
 
 def cancel_order(con):
     order_id = input("order_id: ")
     try:
         order = get_order(con, order_id)
-        order.status.cancel()
+        order.get_status().cancel()
     except Exception as err:
         print_err(err)
         return
@@ -750,9 +773,7 @@ def get_fees(con):
     # normal fee amount so they can be executed after the first month with fees reserved
     res = con.fees()
     if res.status_code != 200:
-        print("ERROR STATUS: {0}".format(res.status_code))
-        print(res.json())
-        return -1, -1, -1, -1
+        raise Exception(result_to_dict(res))
     else:
         fee = res.json()
 
