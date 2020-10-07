@@ -98,6 +98,12 @@ def get_balances(con):
 
         return account_value, available_to_trade_usd, available_to_trade_btc
 
+def get_active_orders(con):
+    res = con.active_orders()
+    if res.status_code != 200:
+        raise Exception(util.result_to_dict(res))
+
+    return res.json()
 
 class Order:
     def __init__(self, con, side, price, quantity, quantity_unit=UNIT_USD, status=None):
