@@ -22,26 +22,24 @@ MAX_API_TAKER_FEE =  0.0035
 MAX_API_TAKER_FEE_DELTA =  MAX_API_TAKER_FEE - MAX_API_MAKER_FEE
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
-def show_help():
-        cmds = [
-                ["bal", "balances and available amounts - [alt: balances]"],
-                ["stat", "avg. cost basis, gain/loss, performance"],
-                ["list", "list open orders - [alt: orders, active]"],
-                ["tick", "price quote - [alt: quote]"],
-                ["buy", "buy in USD quantity (including fee)"],
-                ["buy btc", "buy in BTC quantity"],
-                ["sell", "buy in USD quantity (including fee)"],
-                ["sell btc", "sell in BTC quantity"],
-                ["status", "order status"],
-                ["cancel", "cancel order"],
-                ["cancel all", "cancel all open orders"],
-                ["cancel replace", "cancel and replace an order"],
-                ["past", "list past trades - [alt: history]"],
-                ["export history", "export history to csv"],
-                ["fees", "show fees"],
-                ["exit", "exit the console app"],
-                ]
-        print(tabulate(cmds, headers=["command", "info"]))
+cmds = [
+    ['bal', 'balances and available amounts', lambda con: show_balances(con)],
+    ['stat', 'avg. cost basis, gain/loss, perf', lambda con: show_history(con, history=False, stats=True)],
+    ['list', 'list open orders', lambda con: show_orders(con)],
+    ['tick', 'price quote', lambda con: show_quote(con)],
+    ['buy', 'buy in USD quantity including fees', lambda con: buy(con)],
+    ['buy btc', 'buy in BTC quantity', lambda con: buy_btc(con)],
+    ['sell', 'sell in net USD quantity including fees', lambda con: sell(con)],
+    ['sell btc', 'sell in BTC quantity', lambda con: sell_btc(con)],
+    ['status', 'order status', lambda con: show_order_status(con)],
+    ['cancel', 'cancel an order', lambda con: cancel(con)],
+    ['cancel all', 'cancel all orders', lambda con: cancel_all(con)],
+    ['cancel replace', 'cancel and replace order', lambda con: cancel_and_replace(con)],
+    ['history', 'list past trades', lambda con: show_history(con, history=True, stats=True)],
+    ['history export', 'export history to CSV', lambda con: show_history(con, history=True, stats=False, format=FORMAT_CSV)],
+    ['fees', 'show fees', lambda con: show_fees(con)],
+    ['exit', 'exit the console app', lambda con: done()],
+]
 
 def new_order(con, side, price, quantity, quantity_unit):
     return Order(con, side=side, price=price, quantity=quantity, quantity_unit=UNIT_BTC)
@@ -922,64 +920,27 @@ def init():
 
         return con
 
+def done():
+    print("Have a good one!")
+    return False
+
+def show_help():
+    cmd_table = list(c[0:2] for c in cmds)
+    print(tabulate(cmd_table, headers=["command", "info"]))
+
 def main():
     con = init()
-    cmd = ''
+    lookup = dict((c[0], c[2]) for c in cmds)
+
     while True:
 
         print()
         cmd = input("$ > ")
 
-        if cmd == 'buy':
-            buy(con)
-
-        elif cmd == 'buy btc':
-            buy_btc(con)
-
-        elif cmd == 'sell':
-            sell(con)
-
-        elif cmd == 'sell btc':
-            sell_btc(con)
-
-        elif cmd == 'cancel':
-            cancel_order(con)
-
-        elif cmd == 'cancel all':
-            cancel_all(con)
-
-        elif cmd == 'cancel replace':
-            cancel_and_replace(con)
-
-        elif cmd == 'tick' or cmd == 'quote':
-            show_quote(con)
-
-        elif cmd == 'list' or cmd == 'orders' or cmd == 'active':
-            show_orders(con)
-
-        elif cmd == 'status':
-            show_order_status(con)
-
-        elif cmd == 'past' or cmd == 'history':
-            show_history(con, history=True, stats=True)
-
-        elif cmd == 'export history':
-            show_history(con, history=True, stats=False, format=FORMAT_CSV)
-
-        elif cmd == 'stat' or cmd == 'stats':
-            show_history(con, history=False, stats=True)
-
-        elif cmd == 'bal' or cmd == 'balances':
-            show_balances(con)
-
-        elif cmd == 'fees':
-            show_fees(con)
-
-        elif cmd == 'quit' or cmd == 'q' or cmd == 'exit':
-            print("Have a good one!")
-            break
-
-        else:
+        if not cmd in lookup:
             show_help()
+        else:
+            if lookup[cmd](con) is False:
+                break
 
 main()
