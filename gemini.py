@@ -63,9 +63,6 @@ def get_fees(con):
 
 def get_balances(con):
     bid, ask, spread, last = get_quote(con)
-    if bid < 0:
-        print("Error: bid unavailable")
-        return
 
     res = con.balances()
     if res.status_code != 200:
