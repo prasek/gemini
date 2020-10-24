@@ -297,29 +297,39 @@ def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
             raise Exception(util.result_to_dict(res))
 
         orders = res.json()
-        headers = ["date", "type", "total", "price", "amount", "symbol", "fee_amount", "order_id"]
+        headers = ["date", "type", "price", "amount","basis", "current", "gain/loss", "gain/loss %", "symbol", "fee_amount", "order_id"]
         l = []
         buy_total = 0.0
         buy_quantity = 0.0
+
+        bid, ask, spread, last = gemini.get_quote(con)
 
         for o in orders:
             price = float(o["price"])
             quantity = float(o["amount"])
             fees = float(o["fee_amount"])
-            total = price * quantity + fees
+            basis = price * quantity + fees
+            current = quantity * last
+            gain = current - basis
+            gain_pct = gain / basis * 100
             dt = datetime.fromtimestamp(o["timestamp"])
             o["date"] = dt.strftime("%m/%d/%Y")
-            o["total"] = util.fmt_usd(total)
             o["fee_amount"] = util.fmt_usd(fees)
             o["price"] = util.fmt_usd(price)
+            o["basis"] = util.fmt_usd(basis)
+            o["current"] = util.fmt_usd(current)
             o["symbol"] = symbol
+            o["gain/loss"] = util.fmt_usd(gain)
+            o["gain/loss %"] = util.fmt_pct(gain_pct)
+            o["symbol"] = symbol
+
             item = []
             for h in headers:
                 item.append(o[h])
             l.append(item)
 
             if o["type"] == "Buy":
-                buy_total += total
+                buy_total += basis
                 buy_quantity += quantity
 
         if history:
@@ -350,7 +360,6 @@ def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
         if stats:
             #TODO: calc realized and unrealized gain/loss
             avg_cost_basis = buy_total/buy_quantity
-            bid, ask, spread, last = gemini.get_quote(con)
             perf = ((last / avg_cost_basis) - 1) * 100
             curr_value = buy_quantity * last
             gain = curr_value - buy_total
