@@ -1,6 +1,7 @@
 from api import Geminipy
 from decimal import Decimal
 from datetime import datetime
+from error import ApiError
 import util
 
 SIDE_BUY = "buy"
@@ -27,14 +28,14 @@ def get_order(con, order_id):
 def get_order_status(con, order_id):
     res = con.order_status(order_id)
     if res.status_code != 200:
-        raise Exception(util.result_to_dict(res))
+        raise ApiError(res)
 
     return OrderStatus(con, res.json())
 
 def get_quote(con):
     res = con.pubticker(symbol="btcusd")
     if res.status_code != 200:
-        raise Exception(util.result_to_dict(res))
+        raise ApiError(res)
 
     tick = res.json()
     ask = float(tick["ask"])
@@ -49,7 +50,7 @@ def get_fees(con):
     # normal fee amount so they can be executed after the first month with fees reserved
     res = con.fees()
     if res.status_code != 200:
-        raise Exception(util.result_to_dict(res))
+        raise ApiError(res)
     else:
         fee = res.json()
 
@@ -66,7 +67,7 @@ def get_balances(con):
 
     res = con.balances()
     if res.status_code != 200:
-        raise Exception(util.result_to_dict(res))
+        raise ApiError(res)
     else:
         headers = ["currency", "amount", "available"]
         balances = res.json()
@@ -98,7 +99,7 @@ def get_balances(con):
 def get_active_orders(con):
     res = con.active_orders()
     if res.status_code != 200:
-        raise Exception(util.result_to_dict(res))
+        raise ApiError(res)
 
     return res.json()
 
@@ -292,7 +293,7 @@ class Order:
         res = self.con.new_order(amount=util.fmt_btc(self.btc_amount), price=self.price, side=self.side, options=options)
 
         if res.status_code != 200:
-            raise Exception(util.result_to_dict(res))
+            raise ApiError(res)
 
         self.status = OrderStatus(self.con, res.json())
 
@@ -360,7 +361,7 @@ class OrderStatus:
     def refresh(self):
         res = self.con.order_status(self.get_order_id())
         if res.status_code != 200:
-            raise Exception(util.result_to_dict(res))
+            raise ApiError(res)
 
         self.data = res.json()
 
@@ -370,7 +371,7 @@ class OrderStatus:
 
         res = self.con.cancel_order(self.get_order_id())
         if res.status_code != 200:
-            raise Exception(util.result_to_dict(res))
+            raise ApiError(res)
 
     def to_dict(self):
         return self.data

@@ -1,3 +1,4 @@
+from error import ApiError
 import traceback
 import locale
 
@@ -23,13 +24,12 @@ def is_float(s):
     except :
         return False
 
-def result_to_dict(res):
-    return {"code": res.status_code, "json": res.json()}
-
 def print_err(ex):
-    print("ERROR: {0}".format(ex))
-
-    traceback.print_exception(type(ex), ex, ex.__traceback__)
+    if type(ex) is ApiError:
+        print("ERROR: [{0}] {1}: {2}".format(ex.code, ex.json['reason'], ex.json['message']))
+    else:
+        print("ERROR: {0}".format(ex))
+        traceback.print_exception(type(ex), ex, ex.__traceback__)
 
 def print_list(items, headers):
     l = []

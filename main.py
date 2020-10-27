@@ -3,6 +3,7 @@ import gemini
 from tabulate import tabulate
 from decimal import Decimal
 from datetime import datetime
+from error import ApiError
 import os
 import yaml
 import csv
@@ -133,7 +134,20 @@ def execute_order(o):
     if not confirm_order(o):
         return
 
-    o.execute()
+    try:
+        o.execute()
+    except ApiError as ex:
+        if ex.code == 406  and ex.json['reason'] == 'InsufficientFunds':
+            if not confirm_order_msg("Insufficient funds, adjust for max API fee?"):
+                return
+
+            o.set_reserve_api_fees(gemini.RESERVE_FEE_MAX)
+            o.prepare()
+
+            if not confirm_order(o):
+                return
+
+            o.execute()
 
     if o.get_status().is_cancelled() and o.get_maker_or_cancel():
         print()
@@ -143,11 +157,8 @@ def execute_order(o):
         o.set_maker_or_cancel(False)
         o.prepare()
 
-        print()
-        ok = input("Accept TAKER fee of {0}?? (yes/no) ".format(util.fmt_usd(o.get_fee())))
-        if ok != "yes" and ok != "y":
-            print("skipping order")
-            return False
+        if not confirm_order_msg("Accept TAKER fee of {0}??".format(util.fmt_usd(o.get_fee()))):
+            return
     
         if not confirm_order(o):
             return
@@ -220,7 +231,11 @@ def confirm_order(o):
     for warning in o.get_warnings():
         print(warning)
 
-    ok = input("Execute Order? (yes/no) ")
+    return confirm_order_msg("Execute Order?")
+
+def confirm_order_msg(msg):
+    print()
+    ok = input(msg + " (yes/no) ")
     if ok != "yes" and ok != "y":
         print("skipping order")
         return False
@@ -250,11 +265,8 @@ def cancel_and_replace(con):
             o.set_maker_or_cancel(False)
             o.prepare()
 
-            print()
-            ok = input("Accept TAKER fee of {0}?? (yes/no) ".format(util.fmt_usd(o.get_fee())))
-            if ok != "yes" and ok != "y":
-                print("skipping order")
-                return False
+            if not confirm_order_msg("Accept TAKER fee of {0}??".format(util.fmt_usd(o.get_fee()))):
+                return
         
             if not confirm_order(o):
                 return
@@ -294,7 +306,7 @@ def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
         symbol = "btcusd"
         res = con.past_trades(symbol=symbol, limit_trades=1000)
         if res.status_code != 200:
-            raise Exception(util.result_to_dict(res))
+            raise ApiError(res)
 
         orders = res.json()
         headers = ["date", "type", "price", "amount","basis", "current", "gain/loss", "gain/loss %", "symbol", "fee_amount", "order_id"]
