@@ -18,3 +18,19 @@ clean:
 venv:
 	virtualenv venv
 	venv/bin/python -m pip install --upgrade pip
+
+.PHONY: build
+build:
+	docker build -t prasek/gemini .
+
+.PHONY: push
+push:
+	docker push prasek/gemini:latest
+
+.PHONY: run-docker
+run-docker:
+	docker run -it prasek/gemini
+
+.PHONY: clean-docker
+clean-docker:
+	docker rmi prasek/gemini -f

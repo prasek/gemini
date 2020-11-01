@@ -4,6 +4,16 @@ For use with:
  - https://exchange.gemini.com/
  - https://exchange.sandbox.gemini.com/
 
+## Quick Start
+Create a test account on https://exchange.sandbox.gemini.com/
+
+Install [Docker Desktop for Mac](https://hub.docker.com/editions/community/docker-ce-desktop-mac)
+
+```
+docker run -it prasek/gemini
+```
+
+## Local
  To get started on OSX:
 
 ```
