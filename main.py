@@ -12,7 +12,7 @@ import getpass
 import util
 import locale
 
-assert sys.version_info >= (3, 5)
+assert sys.version_info >= (3, 8)
 
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
