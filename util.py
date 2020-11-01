@@ -2,6 +2,8 @@ from error import ApiError
 import traceback
 import locale
 
+debug = False
+
 def fmt_usd(val):
     return locale.currency(val, grouping=True)
 
@@ -33,6 +35,8 @@ def print_err(ex):
         print_res(ex.res)
     else:
         print("\nERROR: {0}".format(ex))
+
+    if debug:
         traceback.print_exception(type(ex), ex, ex.__traceback__)
 
 def print_list(items, headers):

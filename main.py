@@ -5,16 +5,34 @@ from decimal import Decimal
 from datetime import datetime
 from error import ApiError
 import os
+import sys
 import yaml
 import csv
 import getpass
 import util
 import locale
 
+assert sys.version_info >= (3, 5)
+
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
 FORMAT_TABLE = "table"
 FORMAT_CSV= "csv"
+
+OPT_RESERVE_API_FEES = "reserve_api_fees"
+OPT_DEBUG = "debug"
+DEBUG_ON = "on"
+DEBUG_OFF = "off"
+
+opts = {
+    OPT_RESERVE_API_FEES: gemini.RESERVE_FEE_MAX,
+    OPT_DEBUG: DEBUG_OFF
+}
+
+opts_allowed = {
+    OPT_RESERVE_API_FEES: [gemini.RESERVE_FEE_NONE, gemini.RESERVE_FEE_ACTUAL, gemini.RESERVE_FEE_MAX],
+    OPT_DEBUG: [DEBUG_OFF, DEBUG_ON]
+}
  
 cmds = [
     ['bal', 'balances and available amounts', lambda con: show_balances(con)],
@@ -32,6 +50,8 @@ cmds = [
     ['history', 'list past trades', lambda con: show_history(con, history=True, stats=True)],
     ['history export', 'export history to CSV', lambda con: show_history(con, history=True, stats=False, format=FORMAT_CSV)],
     ['fees', 'show fees', lambda con: show_fees(con)],
+    ['opts', 'view options', lambda con: view_options(con)],
+    ['set opt', 'set option', lambda con: set_option(con)],
     ['exit', 'exit the console app', lambda con: done()],
 ]
 
@@ -129,6 +149,7 @@ def sell_btc(con):
 
 def execute_order(o):
 
+    o.set_reserve_api_fees(opts[OPT_RESERVE_API_FEES])
     o.prepare()
 
     if not confirm_order(o):
@@ -137,7 +158,10 @@ def execute_order(o):
     try:
         o.execute()
     except ApiError as ex:
-        if ex.code == 406  and ex.json['reason'] == 'InsufficientFunds':
+        if (ex.code == 406 and
+            ex.json["reason"] == "InsufficientFunds" and
+            o.get_reserve_api_fees != gemini.RESERVE_FEE_MAX):
+
             if not confirm_order_msg("Insufficient funds, adjust for max API fee?"):
                 return
 
@@ -466,9 +490,60 @@ def show_fees(con):
     except Exception as ex:
         util.print_err(ex)
 
+def view_options(con):
+    print(opts)
+
+def set_option(con):
+    print()
+    opt = input("opt to configure? ")
+    if len(opt) == 0 or not opt in opts:
+        print("invalid opt name")
+        return
+
+    val = input("value {0}? ".format(opts_allowed[opt]))
+    if len(val) == 0 or not val in opts_allowed[opt]:
+        print("invalid value")
+        return
+
+    opts[opt] = val
+
+    print("option set: {0} = {1}".format(opt, val))
+
+    apply_options()
+
+def apply_options():
+    util.debug = opts[OPT_DEBUG] == DEBUG_ON
+
 def init():
     os.system('clear')
 
+    # get config options overrides
+    configfile = "config.yaml"
+    global opts
+    try:
+        if os.path.isfile(configfile):
+            with open(configfile) as f:
+                config = yaml.load(f, Loader=yaml.FullLoader)
+
+                if type(config) is dict:
+                    for k, v in config.items():
+                        if not k in opts:
+                            print("config.yaml key '{0}' is not a config option.".format(k))
+                            continue
+                        if not v in opts_allowed[k]:
+                            print("config.yaml key '{0}' has invalid value '{1}'; allowed values are {2}.".format(k, v, opts_allowed[k]))
+                            continue
+                        opts[k] = v
+
+    except Exception as ex:
+        print()
+        print("Warning: unable to read " + configfile)
+        print()
+        print(ex)
+
+    apply_options()
+
+    # get login creds
     api_key = ''
     secret_key = ''
     live = False

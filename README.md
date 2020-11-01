@@ -47,3 +47,10 @@ Then set the required 600 permission:
 ```
 chmod 600 live.yaml
 ```
+
+### Config Options
+You can customize config options with the `set opt` command or in `./config.yaml`:
+```
+reserve_api_fees: none
+debug: on
+```
