@@ -263,6 +263,9 @@ class Order:
 
         self.subtotal = self.btc_amount * self.price
         self.fee = self.subtotal * fee_pct
+        if self.side == SIDE_SELL:
+            self.fee = -self.fee
+
         self.total = self.subtotal + self.fee
 
         bid, ask, spread, last = get_quote(self.con)

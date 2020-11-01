@@ -65,5 +65,6 @@ chmod 600 live.yaml
 You can customize config options with the `set opt` command or in `./config.yaml`:
 ```
 reserve_api_fees: none
+maker_or_cancel: on
 debug: on
 ```

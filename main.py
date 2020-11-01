@@ -20,18 +20,22 @@ FORMAT_TABLE = "table"
 FORMAT_CSV= "csv"
 
 OPT_RESERVE_API_FEES = "reserve_api_fees"
+OPT_MAKER_OR_CANCEL = "maker_or_cancel"
 OPT_DEBUG = "debug"
-DEBUG_ON = "on"
-DEBUG_OFF = "off"
+
+OPT_VALUE_ON = "on"
+OPT_VALUE_OFF = "off"
 
 opts = {
     OPT_RESERVE_API_FEES: gemini.RESERVE_FEE_MAX,
-    OPT_DEBUG: DEBUG_OFF
+    OPT_MAKER_OR_CANCEL: OPT_VALUE_OFF,
+    OPT_DEBUG: OPT_VALUE_OFF
 }
 
 opts_allowed = {
     OPT_RESERVE_API_FEES: [gemini.RESERVE_FEE_NONE, gemini.RESERVE_FEE_ACTUAL, gemini.RESERVE_FEE_MAX],
-    OPT_DEBUG: [DEBUG_OFF, DEBUG_ON]
+    OPT_MAKER_OR_CANCEL: [OPT_VALUE_ON, OPT_VALUE_OFF],
+    OPT_DEBUG: [OPT_VALUE_ON, OPT_VALUE_OFF]
 }
  
 cmds = [
@@ -150,6 +154,7 @@ def sell_btc(con):
 def execute_order(o):
 
     o.set_reserve_api_fees(opts[OPT_RESERVE_API_FEES])
+    o.set_maker_or_cancel(opts[OPT_MAKER_OR_CANCEL] == OPT_VALUE_ON)
     o.prepare()
 
     if not confirm_order(o):
@@ -178,7 +183,6 @@ def execute_order(o):
     if o.get_status().is_cancelled() and o.get_maker_or_cancel():
         print()
         print("AUTO CANCELLED - MAKER FEE NOT AVAILABLE!")
-        print()
 
         o.set_maker_or_cancel(False)
         o.prepare()
@@ -512,7 +516,7 @@ def set_option(con):
     apply_options()
 
 def apply_options():
-    util.debug = opts[OPT_DEBUG] == DEBUG_ON
+    util.debug = opts[OPT_DEBUG] == OPT_VALUE_ON
 
 def init():
     os.system('clear')
@@ -530,6 +534,20 @@ def init():
                         if not k in opts:
                             print("config.yaml key '{0}' is not a config option.".format(k))
                             continue
+
+                        # yaml marshals as https://yaml.org/type/bool.html
+                        if type(v) is bool:
+                            equivs = []
+                            if v:
+                                equivs = ["on"]
+                            else:
+                                equivs = ["off"]
+
+                            for equiv in equivs:
+                                if equiv in opts_allowed[k]:
+                                    v = equiv
+                                    break
+
                         if not v in opts_allowed[k]:
                             print("config.yaml key '{0}' has invalid value '{1}'; allowed values are {2}.".format(k, v, opts_allowed[k]))
                             continue
