@@ -554,7 +554,7 @@ def init():
             first = False
         else:
             print()
-            again = input("Try again? (yes/no) ")
+            again = input("Try again (yes/no)? ")
             if again != "yes" and again != "y":
                 exit()
 
@@ -563,8 +563,16 @@ def init():
         print("GEMINI API LOGIN")
         util.print_sep()
 
-        site = input("Which Exchange? [live | sandbox] ")
-        live = site == "live"
+        try:
+            site = input("Which Exchange ['live', 'sandbox']? ")
+            live = site == "live"
+        except Exception as ex:
+            print()
+            print("ERROR: {0}".format(ex))
+            print()
+            print("TIP: if running from docker you must use:")
+            print("docker run -it prasek/gemini")
+            exit()
 
         api_key = input("api_key: ")
         secret_key = getpass.getpass("secret_key: ")

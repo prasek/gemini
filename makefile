@@ -19,18 +19,35 @@ venv:
 	virtualenv venv
 	venv/bin/python -m pip install --upgrade pip
 
-.PHONY: build
-build:
-	docker build -t prasek/gemini .
+.PHONY: docker-build
+docker-build:
+	docker build -t gemini .
 
-.PHONY: push
-push:
+.PHONY: docker-push
+docker-push:
+	docker tag gemini prasek/gemini:latest
 	docker push prasek/gemini:latest
 
-.PHONY: run-docker
-run-docker:
-	docker run -it prasek/gemini
+.PHONY: docker-run
+docker-run:
+	docker run -it gemini
 
-.PHONY: clean-docker
-clean-docker:
-	docker rmi prasek/gemini -f
+.PHONY: docker-debug
+docker-debug:
+	docker run -it gemini /bin/sh
+
+.PHONY: docker-rmi
+docker-rmi:
+	docker rmi gemini -f
+
+.PHONY: docker-rmi-all
+docker-rmi-all:
+	docker rmi -f $$(docker images -a -q)
+
+.PHONY: docker-kill-all
+docker-kill-all:
+	docker kill $$(docker ps -q)
+
+.PHONY: docker-rm-all
+docker-rm-all:
+	docker rm $$(docker ps -a -q)

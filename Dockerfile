@@ -8,8 +8,11 @@ RUN apt-get update && \
 ENV LANG en_US.UTF-8
 ENV LC_ALL en_US.UTF-8
 
-COPY *.py /
-COPY requirements.txt /
+RUN mkdir /app
+COPY *.py /app/
+COPY requirements.txt /app/
+
+WORKDIR /app
 RUN pip install -r requirements.txt
 
 CMD [ "python", "./main.py" ]
