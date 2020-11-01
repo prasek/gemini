@@ -5,10 +5,13 @@ For use with:
  - https://exchange.sandbox.gemini.com/
 
 ## Quick Start
-Create a test account on https://exchange.sandbox.gemini.com/
+1. Create a test account on: https://exchange.sandbox.gemini.com/
 
-Install [Docker Desktop for Mac](https://hub.docker.com/editions/community/docker-ce-desktop-mac)
+2. [Create an API Key](https://exchange.sandbox.gemini.com/settings/api) with `Primary` scope and `Trading` permissions.
 
+3. Install [Docker Desktop for Mac](https://hub.docker.com/editions/community/docker-ce-desktop-mac)
+
+4. Run the app
 ```
 docker run -it prasek/gemini
 ```
