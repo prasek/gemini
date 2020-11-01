@@ -19,6 +19,10 @@ locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 FORMAT_TABLE = "table"
 FORMAT_CSV= "csv"
 
+FILE_CONFIG = "config/config.yaml"
+FILE_SANDBOX_CREDS = "config/sandbox.yaml"
+FILE_LIVE_CREDS = "config/live.yaml"
+
 OPT_RESERVE_API_FEES = "reserve_api_fees"
 OPT_MAKER_OR_CANCEL = "maker_or_cancel"
 OPT_DEBUG = "debug"
@@ -522,17 +526,16 @@ def init():
     os.system('clear')
 
     # get config options overrides
-    configfile = "config.yaml"
     global opts
     try:
-        if os.path.isfile(configfile):
-            with open(configfile) as f:
+        if os.path.isfile(FILE_CONFIG):
+            with open(FILE_CONFIG) as f:
                 config = yaml.load(f, Loader=yaml.FullLoader)
 
                 if type(config) is dict:
                     for k, v in config.items():
                         if not k in opts:
-                            print("config.yaml key '{0}' is not a config option.".format(k))
+                            print("{0} key '{1}' is not a config option.".format(FILE_CONFIG, k))
                             continue
 
                         # yaml marshals as https://yaml.org/type/bool.html
@@ -549,7 +552,7 @@ def init():
                                     break
 
                         if not v in opts_allowed[k]:
-                            print("config.yaml key '{0}' has invalid value '{1}'; allowed values are {2}.".format(k, v, opts_allowed[k]))
+                            print("{0} key '{1}' has invalid value '{2}'; allowed values are {3}.".format(FILE_CONFIG, k, v, opts_allowed[k]))
                             continue
                         opts[k] = v
 
@@ -597,11 +600,11 @@ def init():
 
         ok = len(api_key) > 0 and len (secret_key) > 0
         if not ok:
-            filepath = "sandbox.yaml"
+            filepath = FILE_SANDBOX_CREDS
             readfile = False
             try:
                 if live:
-                    filepath = "live.yaml"
+                    filepath = FILE_LIVE_CREDS
                     if os.path.isfile(filepath):
                         perm = oct(os.stat(filepath).st_mode & 0o777)
                         if perm == oct(0o600):

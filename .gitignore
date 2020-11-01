@@ -1,0 +1,4 @@
+config
+venv
+__pycache__
+*.csv
