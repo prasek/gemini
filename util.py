@@ -24,11 +24,15 @@ def is_float(s):
     except :
         return False
 
+def print_res(res):
+    json = res.json()
+    print("\nERROR: [{0}] {1}: {2}".format(res.status_code, json['reason'], json['message']))
+
 def print_err(ex):
     if type(ex) is ApiError:
-        print("ERROR: [{0}] {1}: {2}".format(ex.code, ex.json['reason'], ex.json['message']))
+        print_res(ex.res)
     else:
-        print("ERROR: {0}".format(ex))
+        print("\nERROR: {0}".format(ex))
         traceback.print_exception(type(ex), ex, ex.__traceback__)
 
 def print_list(items, headers):

@@ -148,6 +148,8 @@ def execute_order(o):
                 return
 
             o.execute()
+        else:
+            raise
 
     if o.get_status().is_cancelled() and o.get_maker_or_cancel():
         print()
@@ -427,7 +429,7 @@ def cancel_order(con):
 def cancel_all(con):
     res = con.cancel_all()
     if res.status_code != 200:
-        print(res.json())
+        util.print_res(res)
     else:
         print("all orders cancelled")
 
@@ -493,20 +495,36 @@ def init():
         secret_key = getpass.getpass("secret_key: ")
 
         ok = len(api_key) > 0 and len (secret_key) > 0
-        if not live and not ok:
-            # load the default sandbox creds if avail
+        if not ok:
+            filepath = "sandbox.yaml"
+            readfile = False
             try:
-                with open(r'sandbox.yaml') as file:
-                    creds = yaml.load(file, Loader=yaml.FullLoader)
+                if live:
+                    filepath = "live.yaml"
+                    if os.path.isfile(filepath):
+                        perm = oct(os.stat(filepath).st_mode & 0o777)
+                        if perm == oct(0o600):
+                            readfile = True
+                        else:
+                            print("\n{0} found, but requires 0o600 permission (got {1}) skipping ...".format(filepath, perm))
+                else:
+                   readfile = os.path.isfile(filepath)
 
-                    if not live and api_key == '':
-                        api_key = creds["api_key"]
-                    if not live and secret_key == '':
-                        secret_key = creds["secret_key"]
-            except:
+                if readfile:
+                    with open(filepath) as f:
+                        creds = yaml.load(f, Loader=yaml.FullLoader)
+
+                        if api_key == '':
+                            api_key = creds["api_key"]
+                        if secret_key == '':
+                            secret_key = creds["secret_key"]
+
+            except Exception as ex:
                 print()
-                print("Warning: unable to read default creds from sandbox.yaml")
-                print(" - see README.md for how to setup a default sandbox.yaml")
+                print("Warning: unable to read default creds from " + filepath)
+                print("see README.md for how to setup a default " + filepath)
+                print()
+                print(ex)
 
         ok = len(api_key) > 0 and len (secret_key) > 0
         if not ok:
@@ -517,9 +535,7 @@ def init():
         con = Geminipy(api_key=api_key, secret_key=secret_key, live=live)
         res = con.balances()
         if res.status_code != 200:
-            print()
-            print("ERROR STATUS: {0}".format(res.status_code))
-            print(res.json())
+            util.print_res(res)
             continue
 
         #got keys
