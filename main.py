@@ -434,6 +434,9 @@ def show_lots(con, type=LOTS_CLOSED, format=FORMAT_TABLE):
                         if abs(x_amount) < 0.00000001:
                             x_amount = 0
 
+                        if abs(y_amount) < 0.00000001:
+                            y_amount = 0
+
                         x['amount'] = x_amount
                         y['amount'] = y_amount
 
@@ -497,6 +500,10 @@ def show_lots(con, type=LOTS_CLOSED, format=FORMAT_TABLE):
                 side = o["type"]
 
                 if quantity <= 0:
+                    continue
+
+                # skip unmatched sell orders
+                if gemini.is_side(side, gemini.SIDE_SELL):
                     continue
 
                 price = float(o["price"])
