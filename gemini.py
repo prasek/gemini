@@ -103,6 +103,11 @@ def get_active_orders(con):
 
     return res.json()
 
+def is_side(val, side):
+    if val.lower() == side:
+        return True
+    return False
+
 class Order:
     def __init__(self, con, side, price, quantity, quantity_unit=UNIT_USD, status=None):
         self.con = con

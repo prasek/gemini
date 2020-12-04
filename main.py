@@ -41,6 +41,9 @@ opts_allowed = {
     OPT_MAKER_OR_CANCEL: [OPT_VALUE_ON, OPT_VALUE_OFF],
     OPT_DEBUG: [OPT_VALUE_ON, OPT_VALUE_OFF]
 }
+
+LOTS_OPEN = "open"
+LOTS_CLOSED = "closed"
  
 cmds = [
     ['bal', 'balances and available amounts', lambda con: show_balances(con)],
@@ -56,6 +59,8 @@ cmds = [
     ['cancel all', 'cancel all orders', lambda con: cancel_all(con)],
     ['cancel replace', 'cancel and replace order', lambda con: cancel_and_replace(con)],
     ['history', 'list past trades', lambda con: show_history(con, history=True, stats=True)],
+    ['open', 'list open lots', lambda con: show_lots(con, type=LOTS_OPEN)],
+    ['closed', 'list closed lots', lambda con: show_lots(con, type=LOTS_CLOSED)],
     ['history export', 'export history to CSV', lambda con: show_history(con, history=True, stats=False, format=FORMAT_CSV)],
     ['fees', 'show fees', lambda con: show_fees(con)],
     ['opts', 'view options', lambda con: view_options(con)],
@@ -335,6 +340,232 @@ def print_orders(orders):
     print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
     util.print_sep()
 
+def show_lots(con, type=LOTS_CLOSED, format=FORMAT_TABLE):
+    try:
+        symbol = "btcusd"
+        res = con.past_trades(symbol=symbol, limit_trades=1000)
+        if res.status_code != 200:
+            raise ApiError(res)
+
+        orders = res.json()
+
+        bid, ask, spread, last = gemini.get_quote(con)
+
+        # match all sales & allocate lots in FIFO order
+
+        total_amount = 0.0
+        total_proceeds = 0.0
+        total_basis = 0.0
+        total_gain = 0.0
+        total_buy_fees = 0.0
+        total_sell_fees = 0.0
+        total_fees = 0.0
+
+        closed_positions = []
+
+        for x in orders[::-1]:
+            x_amount = float(x["amount"])
+            if x_amount <= 0:
+                continue
+            if gemini.is_side(x["type"], gemini.SIDE_SELL):
+                for y in orders[::-1]:
+                    if gemini.is_side(y["type"], gemini.SIDE_BUY):
+                        y_amount = float(y["amount"])
+                        if y_amount <= 0:
+                            continue
+
+                        x_amount = float(x["amount"])
+                        x_order_id = x["order_id"]
+                        x_price = float(x["price"])
+                        x_quantity = float(x["amount"])
+                        x_fees = float(x["fee_amount"])
+                        x_proceeds = x_price * x_quantity - x_fees
+                        x_dt = datetime.fromtimestamp(x["timestamp"])
+                        x_date = x_dt.strftime("%m/%d/%Y")
+
+                        y_amount = float(y["amount"])
+                        y_order_id = y["order_id"]
+                        y_price = float(y["price"])
+                        y_quantity = float(y["amount"])
+                        y_fees = float(y["fee_amount"])
+                        y_basis = y_price * y_quantity + y_fees
+                        y_dt = datetime.fromtimestamp(y["timestamp"])
+                        y_date = y_dt.strftime("%m/%d/%Y")
+
+                        z_amount = min(x_amount, y_amount)
+                        z_proceeds = x_proceeds / x_amount * z_amount
+                        z_basis = y_basis / y_amount * z_amount
+                        z_gain = z_proceeds - z_basis
+                        z_gain_pct = z_gain / z_basis * 100
+                        z_buy_fees = y_fees / y_amount * z_amount
+                        z_sell_fees = x_fees / x_amount * z_amount
+                        z_fees = z_buy_fees + z_sell_fees
+
+                        z = {
+                            'amount': util.fmt_btc_long(z_amount),
+                            'buy_date': y_date,
+                            'sell_date': x_date,
+                            'proceeds': util.fmt_usd(z_proceeds),
+                            'basis': util.fmt_usd(z_basis),
+                            'gain': util.fmt_usd(z_gain),
+                            'gain_pct': util.fmt_pct(z_gain_pct),
+                            'buy_fees': util.fmt_usd(z_buy_fees),
+                            'sell_fees': util.fmt_usd(z_sell_fees),
+                            'total_fees': util.fmt_usd(z_fees),
+                            'buy_order_id': y_order_id,
+                            'sell_order_id': x_order_id,
+                        }
+
+                        total_amount += z_amount
+                        total_proceeds += z_proceeds
+                        total_basis += z_basis
+                        total_gain += z_gain
+                        total_buy_fees += z_buy_fees
+                        total_sell_fees += z_sell_fees
+                        total_fees += z_fees
+
+                        # adjust extracted sale from history
+                        x_amount -= z_amount
+                        y_amount -= z_amount
+
+                        x_fees -= z_sell_fees
+                        y_fees -= z_buy_fees
+
+                        if abs(x_amount) < 0.00000001:
+                            x_amount = 0
+
+                        x['amount'] = x_amount
+                        y['amount'] = y_amount
+
+                        x['fee_amount'] = x_fees
+                        y['fee_amount'] = y_fees
+
+                        closed_positions.append(z)
+
+                        if x_amount <= 0:
+                            break;
+
+        # CLOSED LOTS
+        if type == LOTS_CLOSED:
+            headers = ["amount", "buy_date", "sell_date", "proceeds","basis", "gain", "gain_pct", "buy_fees", "sell_fees", "total_fees", "buy_order_id", "sell_order_id"]
+            l = []
+            for p in closed_positions[::-1]:
+                item = []
+                for h in headers:
+                    item.append(p[h])
+                l.append(item)
+
+            print()
+            print("CLOSED LOTS - FIFO ORDERING")
+            util.print_sep()
+            print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
+            util.print_sep()
+
+            avg_cost_basis = total_basis/total_amount
+            total_gain_pct = (total_proceeds/total_basis - 1) * 100
+
+            # CLOSED LOT STATS
+            headers = ["amount", "proceeds", "basis", "gain/loss", "gain/loss %", "avg cost basis/btc", "buy fees", "sell fees", "total fees"]
+            stats = [[
+                    util.fmt_btc(total_amount),
+                    util.fmt_usd(total_proceeds),
+                    util.fmt_usd(total_basis),
+                    util.fmt_usd(total_gain),
+                    util.fmt_pct(total_gain_pct),
+                    util.fmt_usd(avg_cost_basis),
+                    util.fmt_usd(total_buy_fees),
+                    util.fmt_usd(total_sell_fees),
+                    util.fmt_usd(total_fees),
+                    ]]
+
+            print()
+            print("CLOSED LOT STATS")
+            util.print_sep()
+            print(tabulate(stats, headers=headers, stralign="right"))
+            util.print_sep()
+
+        if type == LOTS_OPEN:
+            # OPEN LOTS
+            headers = ["date", "type", "price", "amount", "basis", "current", "gain", "gain_pct", "symbol", "fee_amount", "order_id"]
+            total_amount = 0.0
+            total_basis = 0.0
+            total_current = 0.0
+            total_fees = 0.0
+            l = []
+            for o in orders:
+                quantity = float(o["amount"])
+                side = o["type"]
+
+                if quantity <= 0:
+                    continue
+
+                price = float(o["price"])
+                quantity = float(o["amount"])
+                fees = float(o["fee_amount"])
+                basis = price * quantity + fees
+                current = quantity * last
+                gain = current - basis
+                gain_pct = gain / basis * 100
+                dt = datetime.fromtimestamp(o["timestamp"])
+                o["date"] = dt.strftime("%m/%d/%Y")
+                o["amount"] = util.fmt_btc(quantity)
+                o["fee_amount"] = util.fmt_usd(fees)
+                o["price"] = util.fmt_usd(price)
+                o["basis"] = util.fmt_usd(basis)
+                o["current"] = util.fmt_usd(current)
+                o["symbol"] = symbol
+                o["gain"] = util.fmt_usd(gain)
+                o["gain_pct"] = util.fmt_pct(gain_pct)
+
+                item = []
+                for h in headers:
+                    item.append(o[h])
+                l.append(item)
+
+                if gemini.is_side(side, gemini.SIDE_BUY):
+                    total_amount += quantity
+                    total_basis += basis
+                    total_current += current
+                    total_fees += fees
+
+            print()
+            print("OPEN LOTS - FIFO ORDERING")
+            util.print_sep()
+            print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
+            util.print_sep()
+
+            # OPEN LOT STATS
+            if total_amount > 0:
+                avg_cost_basis = total_basis/total_amount
+                total_gain = total_current - total_basis
+                total_gain_pct = (total_current/total_basis - 1) * 100
+
+                headers = ["amount", "basis", "current value", "gain/loss", "gain/loss %", "avg cost basis/btc", "buy fees", "sell fees", "total fees"]
+                stats = [[
+                        util.fmt_btc(total_amount),
+                        util.fmt_usd(total_basis),
+                        util.fmt_usd(total_gain),
+                        util.fmt_pct(total_gain_pct),
+                        util.fmt_usd(avg_cost_basis),
+                        util.fmt_usd(total_fees),
+                        ]]
+
+                print()
+                print("OPEN LOT STATS")
+                util.print_sep()
+                print(tabulate(stats, headers=headers, stralign="right"))
+                util.print_sep()
+            else:
+                print()
+                print("OPEN LOT STATS")
+                util.print_sep()
+                print("NO OPEN LOTS")
+                util.print_sep()
+
+    except Exception as ex:
+        util.print_err(ex)
+
+
 def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
     try:
         symbol = "btcusd"
@@ -343,10 +574,14 @@ def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
             raise ApiError(res)
 
         orders = res.json()
-        headers = ["date", "type", "price", "amount","basis", "current", "gain/loss", "gain/loss %", "symbol", "fee_amount", "order_id"]
+        headers = ["date", "type", "price", "amount", "basis/proceeds", "symbol", "fee_amount", "order_id"]
         l = []
-        buy_total = 0.0
-        buy_quantity = 0.0
+        total_buy_basis = 0.0
+        total_buy_amount = 0.0
+        total_buy_fees = 0.0
+        total_sell_proceeds = 0.0
+        total_sell_amount = 0.0
+        total_sell_fees = 0.0
 
         bid, ask, spread, last = gemini.get_quote(con)
 
@@ -355,33 +590,43 @@ def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
             quantity = float(o["amount"])
             fees = float(o["fee_amount"])
             basis = price * quantity + fees
+            proceeds = price * quantity - fees
             current = quantity * last
             gain = current - basis
             gain_pct = gain / basis * 100
             dt = datetime.fromtimestamp(o["timestamp"])
             o["date"] = dt.strftime("%m/%d/%Y")
+            o["amount"] = util.fmt_btc(quantity)
             o["fee_amount"] = util.fmt_usd(fees)
             o["price"] = util.fmt_usd(price)
             o["basis"] = util.fmt_usd(basis)
             o["current"] = util.fmt_usd(current)
             o["symbol"] = symbol
-            o["gain/loss"] = util.fmt_usd(gain)
-            o["gain/loss %"] = util.fmt_pct(gain_pct)
-            o["symbol"] = symbol
+
+            side = o["type"]
+            if gemini.is_side(side, gemini.SIDE_BUY):
+                o["basis/proceeds"] = basis
+            if gemini.is_side(side, gemini.SIDE_SELL):
+                o["basis/proceeds"] = proceeds
 
             item = []
             for h in headers:
                 item.append(o[h])
             l.append(item)
 
-            if o["type"] == "Buy":
-                buy_total += basis
-                buy_quantity += quantity
+            if gemini.is_side(side, gemini.SIDE_BUY):
+                total_buy_basis += basis
+                total_buy_amount += quantity
+                total_buy_fees += fees
+            if gemini.is_side(side, gemini.SIDE_SELL):
+                total_sell_proceeds += proceeds
+                total_sell_amount += quantity
+                total_sell_fees += fees
 
         if history:
             if format == FORMAT_TABLE:
                 print()
-                print("HISTORY")
+                print("TRANSACTION HISTORY")
                 util.print_sep()
                 print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
                 util.print_sep()
@@ -405,23 +650,29 @@ def show_history(con, history=True, stats=True, format=FORMAT_TABLE):
 
         if stats:
             #TODO: calc realized and unrealized gain/loss
-            avg_cost_basis = buy_total/buy_quantity
-            perf = ((last / avg_cost_basis) - 1) * 100
-            curr_value = buy_quantity * last
-            gain = curr_value - buy_total
+            avg_cost_basis = total_buy_basis/total_buy_amount
+            current_amount = total_buy_amount - total_sell_amount
+            if current_amount < 0:
+                current_amount = 0
+            current_value = current_amount * last
+            total_gain = total_sell_proceeds + current_value - total_buy_basis
+            total_gain_pct = (total_gain / total_buy_basis) * 100
 
-            headers = ["gain/loss", "gain/loss %", "avg cost basis/btc", "last price", "cost basis", "current value"]
+            headers = ["avg cost basis/btc", "cost basis", "proceeds", "current amount", "current value", "gain", "gain %",  "buy fees", "sell fees"]
             stats = [[
-                    util.fmt_usd(gain),
-                    util.fmt_pct(perf),
                     util.fmt_usd(avg_cost_basis),
-                    util.fmt_usd(last),
-                    util.fmt_usd(buy_total),
-                    util.fmt_usd(curr_value),
+                    util.fmt_usd(total_buy_basis),
+                    util.fmt_usd(total_sell_proceeds),
+                    util.fmt_btc(current_amount),
+                    util.fmt_usd(current_value),
+                    util.fmt_usd(total_gain),
+                    util.fmt_pct(total_gain_pct),
+                    util.fmt_usd(total_buy_fees),
+                    util.fmt_usd(total_sell_fees),
                     ]]
 
             print()
-            print("TRADE STATS")
+            print("TRANSACTION STATS")
             util.print_sep()
             print(tabulate(stats, headers=headers, stralign="right"))
             util.print_sep()

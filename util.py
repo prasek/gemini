@@ -10,6 +10,9 @@ def fmt_usd(val):
 def fmt_btc(val):
     return "{:.8f}".format(val)
 
+def fmt_btc_long(val):
+    return "{:.10f}".format(val)
+
 def fmt_nbr(val):
     return "{:,.2f}".format(val)
 
