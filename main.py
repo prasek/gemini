@@ -59,8 +59,10 @@ cmds = [
     ['cancel all', 'cancel all orders', lambda con: cancel_all(con)],
     ['cancel replace', 'cancel and replace order', lambda con: cancel_and_replace(con)],
     ['history', 'list past trades', lambda con: show_history(con, history=True, stats=True)],
-    ['open', 'list open lots', lambda con: show_lots(con, type=LOTS_OPEN)],
-    ['closed', 'list closed lots', lambda con: show_lots(con, type=LOTS_CLOSED)],
+    ['open', 'list open lots', lambda con: show_lots(con, type=LOTS_OPEN, format=FORMAT_TABLE)],
+    ['open export', 'list open lots', lambda con: show_lots(con, type=LOTS_OPEN, format=FORMAT_CSV)],
+    ['closed', 'list closed lots', lambda con: show_lots(con, type=LOTS_CLOSED, format=FORMAT_TABLE)],
+    ['closed export', 'list closed lots', lambda con: show_lots(con, type=LOTS_CLOSED, format=FORMAT_CSV)],
     ['history export', 'export history to CSV', lambda con: show_history(con, history=True, stats=False, format=FORMAT_CSV)],
     ['fees', 'show fees', lambda con: show_fees(con)],
     ['opts', 'view options', lambda con: view_options(con)],
@@ -458,34 +460,53 @@ def show_lots(con, type=LOTS_CLOSED, format=FORMAT_TABLE):
                     item.append(p[h])
                 l.append(item)
 
-            print()
-            print("CLOSED LOTS - FIFO ORDERING")
-            util.print_sep()
-            print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
-            util.print_sep()
+            if format == FORMAT_TABLE:
+                print()
+                print("CLOSED LOTS - FIFO ORDERING")
+                util.print_sep()
+                print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
+                util.print_sep()
 
-            avg_cost_basis = total_basis/total_amount
-            total_gain_pct = (total_proceeds/total_basis - 1) * 100
+                avg_cost_basis = total_basis/total_amount
+                total_gain_pct = (total_proceeds/total_basis - 1) * 100
 
-            # CLOSED LOT STATS
-            headers = ["amount", "proceeds", "basis", "gain/loss", "gain/loss %", "avg cost basis/btc", "buy fees", "sell fees", "total fees"]
-            stats = [[
-                    util.fmt_btc(total_amount),
-                    util.fmt_usd(total_proceeds),
-                    util.fmt_usd(total_basis),
-                    util.fmt_usd(total_gain),
-                    util.fmt_pct(total_gain_pct),
-                    util.fmt_usd(avg_cost_basis),
-                    util.fmt_usd(total_buy_fees),
-                    util.fmt_usd(total_sell_fees),
-                    util.fmt_usd(total_fees),
-                    ]]
+                # CLOSED LOT STATS
+                headers = ["amount", "proceeds", "basis", "gain/loss", "gain/loss %", "avg cost basis/btc", "buy fees", "sell fees", "total fees"]
+                stats = [[
+                        util.fmt_btc(total_amount),
+                        util.fmt_usd(total_proceeds),
+                        util.fmt_usd(total_basis),
+                        util.fmt_usd(total_gain),
+                        util.fmt_pct(total_gain_pct),
+                        util.fmt_usd(avg_cost_basis),
+                        util.fmt_usd(total_buy_fees),
+                        util.fmt_usd(total_sell_fees),
+                        util.fmt_usd(total_fees),
+                        ]]
 
-            print()
-            print("CLOSED LOT STATS")
-            util.print_sep()
-            print(tabulate(stats, headers=headers, stralign="right"))
-            util.print_sep()
+                print()
+                print("CLOSED LOT STATS")
+                util.print_sep()
+                print(tabulate(stats, headers=headers, stralign="right"))
+                util.print_sep()
+
+            elif format == FORMAT_CSV:
+                filename = input("Filename (defauilt: closed-lots.csv):")
+                if len(filename) == 0:
+                    filename = "closed-lots.csv"
+
+                print()
+                print("writing closed lots to " + filename)
+
+                with open(filename, 'w', newline='') as csvfile:
+                    writer = csv.DictWriter(csvfile, fieldnames=headers, delimiter='\t', extrasaction='ignore')
+
+                    writer.writeheader()
+                    for o in closed_positions:
+                        writer.writerow(o)
+                print("done.")
+            else:
+                print("Invalid format: " + format)
 
         if type == LOTS_OPEN:
             # OPEN LOTS
@@ -535,39 +556,58 @@ def show_lots(con, type=LOTS_CLOSED, format=FORMAT_TABLE):
                     total_current += current
                     total_fees += fees
 
-            print()
-            print("OPEN LOTS - FIFO ORDERING")
-            util.print_sep()
-            print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
-            util.print_sep()
+            if format == FORMAT_TABLE:
+                print()
+                print("OPEN LOTS - FIFO ORDERING")
+                util.print_sep()
+                print(tabulate(l, headers=headers, floatfmt=".8g", stralign="right"))
+                util.print_sep()
 
-            # OPEN LOT STATS
-            if total_amount > 0:
-                avg_cost_basis = total_basis/total_amount
-                total_gain = total_current - total_basis
-                total_gain_pct = (total_current/total_basis - 1) * 100
+                # OPEN LOT STATS
+                if total_amount > 0:
+                    avg_cost_basis = total_basis/total_amount
+                    total_gain = total_current - total_basis
+                    total_gain_pct = (total_current/total_basis - 1) * 100
 
-                headers = ["amount", "basis", "current value", "gain/loss", "gain/loss %", "avg cost basis/btc", "buy fees", "sell fees", "total fees"]
-                stats = [[
-                        util.fmt_btc(total_amount),
-                        util.fmt_usd(total_basis),
-                        util.fmt_usd(total_gain),
-                        util.fmt_pct(total_gain_pct),
-                        util.fmt_usd(avg_cost_basis),
-                        util.fmt_usd(total_fees),
-                        ]]
+                    headers = ["amount", "basis", "current value", "gain/loss", "gain/loss %", "avg cost basis/btc", "buy fees", "sell fees", "total fees"]
+                    stats = [[
+                            util.fmt_btc(total_amount),
+                            util.fmt_usd(total_basis),
+                            util.fmt_usd(total_gain),
+                            util.fmt_pct(total_gain_pct),
+                            util.fmt_usd(avg_cost_basis),
+                            util.fmt_usd(total_fees),
+                            ]]
+
+                    print()
+                    print("OPEN LOT STATS")
+                    util.print_sep()
+                    print(tabulate(stats, headers=headers, stralign="right"))
+                    util.print_sep()
+                else:
+                    print()
+                    print("OPEN LOT STATS")
+                    util.print_sep()
+                    print("NO OPEN LOTS")
+                    util.print_sep()
+            elif format == FORMAT_CSV:
+                filename = input("Filename (defauilt: open-lots.csv):")
+                if len(filename) == 0:
+                    filename = "open-lots.csv"
 
                 print()
-                print("OPEN LOT STATS")
-                util.print_sep()
-                print(tabulate(stats, headers=headers, stralign="right"))
-                util.print_sep()
+                print("writing open lots to " + filename)
+
+                with open(filename, 'w', newline='') as csvfile:
+                    writer = csv.DictWriter(csvfile, fieldnames=headers, delimiter='\t', extrasaction='ignore')
+
+                    writer.writeheader()
+                    for o in orders:
+                        if float(o["amount"]) > 0:
+                            writer.writerow(o)
+                print("done.")
             else:
-                print()
-                print("OPEN LOT STATS")
-                util.print_sep()
-                print("NO OPEN LOTS")
-                util.print_sep()
+                print("Invalid format: " + format)
 
     except Exception as ex:
         util.print_err(ex)
