@@ -1,8 +1,11 @@
 from error import ApiError
 import traceback
 import locale
+import datetime as dt
 
 debug = False
+
+DATETIME_FMT = "%m/%d/%Y"
 
 def fmt_usd(val):
     return locale.currency(val, grouping=True)
@@ -19,12 +22,22 @@ def fmt_nbr(val):
 def fmt_pct(val):
     return "{:.2f}%".format(val)
 
-def fmt_date(dt):
-    return dt.strftime("%m/%d/%Y")
+def fmt_date(val):
+    return val.strftime(DATETIME_FMT)
+
+def to_date(val):
+    return dt.datetime.strptime(val, DATETIME_FMT)
 
 def is_float(s):
     try :
         float(s)
+        return True
+    except :
+        return False
+
+def is_int(s):
+    try :
+        int(s)
         return True
     except :
         return False

@@ -18,6 +18,7 @@ locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
 FORMAT_TABLE = "table"
 FORMAT_CSV= "csv"
+FORMAT_TURBOTAX_CSV= "csv-tt"
 
 FILE_CONFIG = "config/config.yaml"
 FILE_SANDBOX_CREDS = "config/sandbox.yaml"
@@ -62,8 +63,9 @@ cmds = [
     ['open', 'list open lots', lambda con: show_lots(con, type=LOTS_OPEN, format=FORMAT_TABLE)],
     ['open export', 'list open lots', lambda con: show_lots(con, type=LOTS_OPEN, format=FORMAT_CSV)],
     ['closed', 'list closed lots', lambda con: show_lots(con, type=LOTS_CLOSED, format=FORMAT_TABLE)],
-    ['closed export', 'list closed lots', lambda con: show_lots(con, type=LOTS_CLOSED, format=FORMAT_CSV)],
+    ['closed export', 'export closed lots', lambda con: show_lots(con, type=LOTS_CLOSED, format=FORMAT_CSV)],
     ['history export', 'export history to CSV', lambda con: show_history(con, history=True, stats=False, format=FORMAT_CSV)],
+    ['turbotax export', 'export turbotax', lambda con: show_lots(con, type=LOTS_CLOSED, format=FORMAT_TURBOTAX_CSV)],
     ['fees', 'show fees', lambda con: show_fees(con)],
     ['opts', 'view options', lambda con: view_options(con)],
     ['set opt', 'set option', lambda con: set_option(con)],
@@ -254,6 +256,18 @@ def get_quantity(con, side, unit):
 
     return quantity
 
+def get_year(prompt):
+    year = input(prompt)
+
+    if year == "all":
+        year = ""
+
+    if len(year) > 0:
+        if not util.is_int(year):
+            raise Exception("Invalid year.")
+
+    return year
+
 def confirm_order(o):
     util.print_header("CONFIRM {0}:".format(o.get_side().upper()))
     print(tabulate([["PRICE", "", ""],
@@ -383,7 +397,7 @@ def show_lots(con, type=LOTS_CLOSED, format=FORMAT_TABLE):
                         x_fees = float(x["fee_amount"])
                         x_proceeds = x_price * x_quantity - x_fees
                         x_dt = datetime.fromtimestamp(x["timestamp"])
-                        x_date = x_dt.strftime("%m/%d/%Y")
+                        x_date = util.fmt_date(x_dt)
 
                         y_amount = float(y["amount"])
                         y_order_id = y["order_id"]
@@ -392,7 +406,7 @@ def show_lots(con, type=LOTS_CLOSED, format=FORMAT_TABLE):
                         y_fees = float(y["fee_amount"])
                         y_basis = y_price * y_quantity + y_fees
                         y_dt = datetime.fromtimestamp(y["timestamp"])
-                        y_date = y_dt.strftime("%m/%d/%Y")
+                        y_date = util.fmt_date(y_dt)
 
                         z_amount = min(x_amount, y_amount)
                         z_proceeds = x_proceeds / x_amount * z_amount
@@ -450,6 +464,16 @@ def show_lots(con, type=LOTS_CLOSED, format=FORMAT_TABLE):
                         if x_amount <= 0:
                             break;
 
+        taxyear = get_year("Tax Year (default: all): ")
+        if len(taxyear) > 0:
+            taxyear = int(taxyear)
+            def filter_taxyear(z):
+                year = util.to_date(z['sell_date']).year
+                return year == taxyear
+
+            closed_positions = list(filter(filter_taxyear, closed_positions))
+
+
         # CLOSED LOTS
         if type == LOTS_CLOSED:
             headers = ["amount", "buy_date", "sell_date", "proceeds","basis", "gain", "gain_pct", "buy_fees", "sell_fees", "total_fees", "buy_order_id", "sell_order_id"]
@@ -499,12 +523,41 @@ def show_lots(con, type=LOTS_CLOSED, format=FORMAT_TABLE):
                 print("writing closed lots to " + filename)
 
                 with open(filename, 'w', newline='') as csvfile:
-                    writer = csv.DictWriter(csvfile, fieldnames=headers, delimiter='\t', extrasaction='ignore')
+                    writer = csv.DictWriter(csvfile, fieldnames=headers, delimiter=',', extrasaction='ignore')
 
                     writer.writeheader()
                     for o in closed_positions:
                         writer.writerow(o)
                 print("done.")
+
+            elif format == FORMAT_TURBOTAX_CSV:
+                headers = ["Asset name", "Received Date", "Cost Basis (USD)", "Date sold", "Proceeds"]
+                filename = input("Filename (default: turbotax.csv):")
+                if len(filename) == 0:
+                    filename = "turbotax.csv"
+
+                def bitcointax_turbotax(z):
+                    return {
+                        'Asset name': "{:.8f} BTC".format(float(z['amount'])),
+                        'Received Date': z['buy_date'],
+                        'Cost Basis (USD)': z['basis'],
+                        'Date sold': z['sell_date'],
+                        'Proceeds': z['proceeds'],
+                    }
+
+                tt_closed_positions = map(bitcointax_turbotax, closed_positions)
+
+                print()
+                print("writing closed lots (turbotax) to " + filename)
+
+                with open(filename, 'w', newline='') as csvfile:
+                    writer = csv.DictWriter(csvfile, fieldnames=headers, delimiter=',', extrasaction='ignore')
+
+                    writer.writeheader()
+                    for o in tt_closed_positions:
+                        writer.writerow(o)
+                print("done.")
+
             else:
                 print("Invalid format: " + format)
 

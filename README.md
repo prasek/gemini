@@ -13,7 +13,7 @@ For use with:
 
 4. Run the app and login with the API Key you created in step #2.
 ```
-docker run -it --rm prasek/gemini:v1.1.1
+docker run -it --rm prasek/gemini:v1.2.0
 ```
 
 ## Local
@@ -71,5 +71,5 @@ debug: on
 
 ### Passing Config Options with Docker
 ```
-docker run -it --rm -v "$(pwd)/config":/app/config prasek/gemini:v1.1.1
+docker run -it --rm -v "$(pwd)/config":/app/config prasek/gemini:v1.2.0
 ```
